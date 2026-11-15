@@ -51,6 +51,8 @@ import {
 } from "./par";
 import { registerEndpoint } from "./register";
 import {
+	ACCESS_TOKEN_FORMATS,
+	isAccessTokenFormat,
 	logEnforcePerClientResourcesResolution,
 	logStartupSeedFailure,
 	seedResourcesOnce,
@@ -260,6 +262,16 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 	if (opts.accessTokenSubject === "pairwise" && !opts.pairwiseSecret) {
 		throw new BetterAuthError(
 			'accessTokenSubject: "pairwise" requires pairwiseSecret',
+		);
+	}
+
+	const defaultAccessTokenFormat = opts.resourceDefaults?.accessTokenFormat;
+	if (
+		defaultAccessTokenFormat !== undefined &&
+		!isAccessTokenFormat(defaultAccessTokenFormat)
+	) {
+		throw new BetterAuthError(
+			`resourceDefaults.accessTokenFormat must be one of ${ACCESS_TOKEN_FORMATS.join(", ")}`,
 		);
 	}
 

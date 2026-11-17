@@ -528,6 +528,86 @@ describe("CIMD metadata resolver", () => {
 			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
 		});
 
+		it("keeps an abandoned fetch that finishes later from overwriting the fetch that replaced it", async () => {
+			const clientId = "https://abandoned-late.example/metadata.json";
+			const lateResponse = deferred<Response>();
+			const fetchClientMetadataResource = vi.fn(async () =>
+				documentResponse(
+					sampleMetadata(clientId, { client_name: "Replacement" }),
+				),
+			);
+			fetchClientMetadataResource.mockImplementationOnce(
+				() => lateResponse.promise,
+			);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 0 },
+			});
+			const { ctx } = await createRequestContext();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+			const leader = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(0);
+			const joined = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(await joined).toMatchObject({
+				metadata: { client_name: "Replacement" },
+			});
+
+			// A transport that ignores the abort signal can still answer late. Its
+			// body is read without the signal, so the document is valid.
+			const late = documentResponse(
+				sampleMetadata(clientId, { client_name: "Abandoned" }),
+			);
+			Object.defineProperty(late, "body", { value: null });
+			lateResponse.resolve(late);
+			expect(await leader).toMatchObject({
+				metadata: { client_name: "Abandoned" },
+			});
+
+			expect(await resolve(ctx, clientId)).toMatchObject({
+				fromCache: true,
+				metadata: { client_name: "Replacement" },
+			});
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
+		});
+
+		it("does not let an abandoned fetch that fails later pace the fetch that replaced it", async () => {
+			const clientId = "https://abandoned-failure.example/metadata.json";
+			let failLeader!: (error: Error) => void;
+			const fetchClientMetadataResource = vi.fn(async () =>
+				documentResponse(sampleMetadata(clientId), "no-store"),
+			);
+			fetchClientMetadataResource.mockImplementationOnce(
+				() =>
+					new Promise<Response>((_resolve, reject) => {
+						failLeader = reject;
+					}),
+			);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 3_600 },
+			});
+			const { ctx } = await createRequestContext();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+			const leader = resolve(ctx, clientId);
+			const leaderOutcome = leader.then(
+				() => "resolved",
+				() => "rejected",
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			const joined = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(10_000);
+			// The abandoned fetch's pacing record is gone, so the replacement ran.
+			expect(await joined).toMatchObject({ fromCache: false });
+
+			failLeader(new Error("transport failed"));
+			expect(await leaderOutcome).toBe("rejected");
+			expect(await resolve(ctx, clientId)).toMatchObject({ fromCache: false });
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(3);
+		});
+
 		it("saves the client for a joined request that fetched for itself", async () => {
 			const clientId = "https://abandoned-then-saved.example/metadata.json";
 			const fetchClientMetadataResource = vi.fn(async () =>

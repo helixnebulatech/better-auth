@@ -59,7 +59,8 @@ interface FetchedMetadata {
 
 interface InFlightMetadataFetch {
 	fetched: Promise<FetchedMetadata>;
-	releasePermit: () => void;
+	/** Retires the fetch and returns its permit. Calling it again does nothing. */
+	abandon: () => void;
 }
 
 interface ResolvedMetadataFetchPolicy {
@@ -525,8 +526,10 @@ export function createCimdMetadataResolver(
 	});
 
 	// A fetch started by a request that the runtime then ends never settles, and
-	// its permit is never released. A request that joined it stops waiting, drops
-	// the abandoned fetch, and returns its permit, so later requests fetch again.
+	// its permit is never released. A request that joined it stops waiting and
+	// retires the fetch: it leaves the in-flight map, its pacing record and permit
+	// are returned, and it can no longer publish or record a failure, so later
+	// requests fetch again.
 	const joinFetch = async (
 		clientId: string,
 		inFlight: InFlightMetadataFetch,
@@ -545,8 +548,9 @@ export function createCimdMetadataResolver(
 		if (fetched === undefined) {
 			if (inFlightFetchByClientId.get(clientId) === inFlight) {
 				inFlightFetchByClientId.delete(clientId);
+				lastFetchStartAtMsByClientId.delete(clientId);
 			}
-			inFlight.releasePermit();
+			inFlight.abandon();
 		}
 		return fetched;
 	};
@@ -596,6 +600,7 @@ export function createCimdMetadataResolver(
 		}
 
 		const releaseMetadataFetchPermit = acquireMetadataFetchPermit(clientId);
+		let abandoned = false;
 		const fetchPromise = (async (): Promise<FetchedMetadata> => {
 			const fetched = await fetchClientMetadataDocument(
 				ctx,
@@ -633,26 +638,34 @@ export function createCimdMetadataResolver(
 				metadataRevalidationInterval,
 				Date.now(),
 			);
-			if (nextEntry) {
-				storeCacheEntry(clientId, nextEntry);
-			} else {
-				metadataCache.delete(clientId);
+			// A retired fetch leaves the cache and pacing to the fetch that replaced it.
+			if (!abandoned) {
+				if (nextEntry) {
+					storeCacheEntry(clientId, nextEntry);
+				} else {
+					metadataCache.delete(clientId);
+				}
+				// Successful fetches are governed by HTTP freshness and origin/global
+				// budgets. Keep the per-client interval only as failed-fetch backoff.
+				lastFetchStartAtMsByClientId.delete(clientId);
 			}
-			// Successful fetches are governed by HTTP freshness and origin/global
-			// budgets. Keep the per-client interval only as failed-fetch backoff.
-			lastFetchStartAtMsByClientId.delete(clientId);
 			return { metadata, entry: nextEntry };
 		})();
 		const inFlight = {
 			fetched: fetchPromise,
-			releasePermit: releaseMetadataFetchPermit,
+			abandon() {
+				abandoned = true;
+				releaseMetadataFetchPermit();
+			},
 		};
 		inFlightFetchByClientId.set(clientId, inFlight);
 		try {
 			return toResolution(clientId, await fetchPromise, false);
 		} catch (error) {
-			lastFetchStartAtMsByClientId.delete(clientId);
-			lastFetchStartAtMsByClientId.set(clientId, Date.now());
+			if (!abandoned) {
+				lastFetchStartAtMsByClientId.delete(clientId);
+				lastFetchStartAtMsByClientId.set(clientId, Date.now());
+			}
 			throw error;
 		} finally {
 			if (inFlightFetchByClientId.get(clientId) === inFlight) {

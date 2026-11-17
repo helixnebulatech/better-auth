@@ -228,7 +228,7 @@ export function getOAuthProviderApi(
 				method: authMethod,
 				confirmation,
 			};
-			await recordAuthenticatedClient(authenticated);
+			await recordAuthenticatedClient(ctx, authenticated);
 			return authenticated;
 		},
 		issueAuthorizationCode: async (params) => {
@@ -276,7 +276,7 @@ export function getOAuthProviderApi(
 			expectedJkt?: string;
 		}) => {
 			const proof = await verifyEndpointDpopProof(ctx, opts, params);
-			if (proof) await recordVerifiedDpopProof(proof);
+			if (proof) await recordVerifiedDpopProof(ctx, proof);
 			return proof;
 		}) as OAuthProviderApi["verifyDpopProof"],
 		issueDpopNonce: () => issueEndpointDpopNonce(ctx, opts),

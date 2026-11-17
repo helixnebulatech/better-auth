@@ -13,7 +13,12 @@ import { getTestInstance } from "better-auth/test";
 import { beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { oauthProviderClient } from "./client";
 import { oauthProvider } from "./oauth";
-import { checkOAuthClient, oauthToSchema, schemaToOAuth } from "./register";
+import {
+	checkOAuthClient,
+	oauthToSchema,
+	resolveMetadataDocumentClientLists,
+	schemaToOAuth,
+} from "./register";
 import { resetSeedStateForTests } from "./resources";
 import type { OAuthOptions } from "./types";
 import type { OAuthClient } from "./types/oauth";
@@ -2491,5 +2496,61 @@ describe("oauth register - clientRegistrationDefaultApplicationType", async () =
 		expect(response.status).toBe(400);
 		const body = (await response.json()) as { error?: string };
 		expect(body.error).toBe("invalid_redirect_uri");
+	});
+});
+
+describe("resolveMetadataDocumentClientLists", () => {
+	const options = {
+		loginPage: "/login",
+		consentPage: "/consent",
+		scopes: ["openid", "profile", "email"],
+	};
+
+	it("keeps the lists a document names", () => {
+		expect(
+			resolveMetadataDocumentClientLists(options, {
+				grant_types: ["authorization_code", "refresh_token"],
+				response_types: ["code"],
+			}),
+		).toMatchObject({
+			grantTypes: ["authorization_code", "refresh_token"],
+			responseTypes: ["code"],
+		});
+	});
+
+	it("gives a document that omits its lists the registration defaults", () => {
+		expect(resolveMetadataDocumentClientLists(options, {})).toMatchObject({
+			grantTypes: ["authorization_code"],
+			responseTypes: ["code"],
+		});
+	});
+
+	it("derives no response type when the grants do not include authorization_code", () => {
+		expect(
+			resolveMetadataDocumentClientLists(options, {
+				grant_types: ["client_credentials"],
+			}),
+		).toMatchObject({
+			grantTypes: ["client_credentials"],
+			responseTypes: undefined,
+		});
+	});
+
+	it("registers the server's scopes for every document", () => {
+		expect(resolveMetadataDocumentClientLists(options, {}).scopes).toEqual([
+			"openid",
+			"profile",
+			"email",
+		]);
+		expect(
+			resolveMetadataDocumentClientLists(
+				{
+					...options,
+					clientRegistrationDefaultScopes: ["openid"],
+					clientRegistrationAllowedScopes: ["profile"],
+				},
+				{},
+			).scopes,
+		).toEqual(["openid", "profile"]);
 	});
 });

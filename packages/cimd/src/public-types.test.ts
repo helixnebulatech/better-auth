@@ -1,10 +1,14 @@
 import type {
 	CimdClientCreatedEvent,
 	CimdClientRefreshedEvent,
+	CimdMetadataResolution,
+	CimdMetadataResolver,
+	CimdMetadataResolverOptions,
 	CimdMetadataValidationOptions,
 	CimdMetadataValidationResult,
 	CimdOptions,
 } from "@better-auth/cimd";
+import type { GenericEndpointContext } from "@better-auth/core";
 import type {
 	OAuthClientMetadata,
 	SchemaClient,
@@ -37,6 +41,48 @@ describe("public CIMD surface", () => {
 		expectTypeOf<CimdOptions>().toHaveProperty("metadataRevalidationInterval");
 		expectTypeOf<CimdOptions>().not.toHaveProperty("refreshRate");
 		void assertValidationResultNarrowing;
+	});
+
+	it("exports one metadata resolver for sharing a cache across discoveries", () => {
+		expect(cimdExports).toHaveProperty("createCimdMetadataResolver");
+		expect(cimdExports).not.toHaveProperty(
+			"createCimdMetadataResolver.resolve",
+		);
+		expectTypeOf(
+			cimdExports.createCimdMetadataResolver,
+		).parameters.toEqualTypeOf<[CimdMetadataResolverOptions]>();
+		expectTypeOf(
+			cimdExports.createCimdMetadataResolver,
+		).returns.toEqualTypeOf<CimdMetadataResolver>();
+		expectTypeOf<CimdMetadataResolver>().toEqualTypeOf<
+			(
+				context: GenericEndpointContext,
+				clientId: string,
+			) => Promise<CimdMetadataResolution | null>
+		>();
+		expectTypeOf<CimdMetadataResolution>().toEqualTypeOf<{
+			metadata: OAuthClientMetadata;
+			fromCache: boolean;
+			discard(): void;
+		}>();
+		expectTypeOf<CimdOptions["metadataResolver"]>().toEqualTypeOf<
+			CimdMetadataResolver | undefined
+		>();
+		expectTypeOf<CimdMetadataResolverOptions>().toHaveProperty(
+			"fetchClientMetadataResource",
+		);
+		expectTypeOf<CimdMetadataResolverOptions>().not.toHaveProperty(
+			"onClientCreated",
+		);
+		expectTypeOf<CimdMetadataResolverOptions>().not.toHaveProperty(
+			"metadataResolver",
+		);
+	});
+
+	it("keeps the released policy callback signature", () => {
+		expectTypeOf<
+			NonNullable<CimdOptions["isMetadataDocumentUrlAllowed"]>
+		>().parameters.toEqualTypeOf<[string, GenericEndpointContext]>();
 	});
 
 	it("exports named callback event contracts", () => {

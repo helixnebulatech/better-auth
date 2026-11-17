@@ -8,6 +8,37 @@ import type {
 
 export type CimdMetadataProfile = "mcp-2026-07-28";
 
+/** A validated Client ID Metadata Document, ready to be persisted. */
+export interface CimdMetadataResolution {
+	/** Validated document. A copy: changing it does not change the cache. */
+	metadata: OAuthClientMetadata;
+	/**
+	 * Whether an unexpired cache entry answered, so the origin was not
+	 * contacted for this request.
+	 */
+	fromCache: boolean;
+	/**
+	 * Drop the cached document, so the next request fetches it again after the
+	 * per-client minimum interval. Call it when the document was fetched for
+	 * this request but its client could not be saved.
+	 */
+	discard(): void;
+}
+
+/**
+ * Fetches, validates, and caches Client ID Metadata Documents without touching
+ * the database. Create one with {@link createCimdMetadataResolver}.
+ *
+ * Returns `null` when `clientId` is not a Client ID Metadata Document URL. The
+ * context is the request's own: it reaches `isMetadataDocumentUrlAllowed` and
+ * supplies the OAuth provider's extension fields, and nothing is written
+ * through it.
+ */
+export type CimdMetadataResolver = (
+	context: GenericEndpointContext,
+	clientId: string,
+) => Promise<CimdMetadataResolution | null>;
+
 export interface CimdClientCreatedEvent {
 	/** Newly persisted discovery-owned OAuth client. */
 	client: SchemaClient<Scope[]>;
@@ -111,8 +142,8 @@ export interface CimdOptions {
 	 */
 	metadataFetchPolicy?: CimdMetadataFetchPolicy;
 	/**
-	 * Maximum number of validated metadata documents retained by this plugin
-	 * instance. The least-recently-used entry is evicted when the bound is
+	 * Maximum number of validated metadata documents retained by the metadata
+	 * resolver. The least-recently-used entry is evicted when the bound is
 	 * reached.
 	 *
 	 * @default 1000
@@ -173,4 +204,35 @@ export interface CimdOptions {
 	 * does not roll back an otherwise valid refresh.
 	 */
 	onClientRefreshed?: (event: CimdClientRefreshedEvent) => void | Promise<void>;
+	/**
+	 * Share one metadata cache, set of fetch budgets, and in-flight fetch map
+	 * across several discoveries, by passing the result of
+	 * {@link createCimdMetadataResolver}. Each request still saves the client
+	 * with its own context.
+	 *
+	 * The resolver owns every option that governs fetching and validation, so
+	 * `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`,
+	 * `metadataFetchPolicy`, `maxCacheEntries`, and
+	 * `isMetadataDocumentUrlAllowed` must be set on it and are rejected here.
+	 * `fetchClientMetadataResource` is still required, because discovery-owned
+	 * resources such as `jwks_uri` use it.
+	 *
+	 * @default a resolver owned by this discovery
+	 */
+	metadataResolver?: CimdMetadataResolver;
 }
+
+/**
+ * The options that govern how metadata documents are fetched, validated, and
+ * cached. They belong to the resolver, not to the discovery that consumes it.
+ */
+export type CimdMetadataResolverOptions = Pick<
+	CimdOptions,
+	| "fetchClientMetadataResource"
+	| "isMetadataDocumentUrlAllowed"
+	| "maxCacheEntries"
+	| "metadataFetchPolicy"
+	| "metadataProfile"
+	| "metadataRevalidationInterval"
+	| "originBoundFields"
+>;

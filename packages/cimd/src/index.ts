@@ -5,7 +5,7 @@ import type {
 import { extendOAuthProvider } from "@better-auth/oauth-provider";
 import type { BetterAuthPlugin } from "better-auth";
 import { CIMD_CLIENT_DISCOVERY_ID } from "./client-store";
-import { createCimdResolver } from "./resolver";
+import { createCimdMetadataResolver, createCimdResolver } from "./resolver";
 import type { CimdOptions } from "./types";
 import { isCimdClientIdUrlCandidate } from "./validate-metadata-document";
 import { PACKAGE_VERSION } from "./version";
@@ -71,6 +71,9 @@ export type {
 	CimdClientRefreshedEvent,
 	CimdMetadataFetchPolicy,
 	CimdMetadataProfile,
+	CimdMetadataResolution,
+	CimdMetadataResolver,
+	CimdMetadataResolverOptions,
 	CimdOptions,
 } from "./types";
 export type {
@@ -82,3 +85,4 @@ export {
 	validateCimdMetadata,
 	validateClientIdUrl,
 } from "./validate-metadata-document";
+export { createCimdMetadataResolver };

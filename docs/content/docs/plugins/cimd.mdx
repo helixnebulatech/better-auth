@@ -136,7 +136,7 @@ export const cimdOptionsType = {
 		type: "number",
 		default: "1000",
 		description:
-			"Maximum validated metadata documents retained by this plugin instance.",
+			"Maximum validated metadata documents retained by the metadata resolver, which is this plugin instance's own unless you pass `metadataResolver`.",
 	},
 	metadataFetchPolicy: {
 		type: "{ minimumFetchInterval?: number | string; maximumConcurrentFetches?: number; maximumConcurrentFetchesPerOrigin?: number; maximumFetchesPerMinute?: number; maximumFetchesPerOriginPerMinute?: number }",
@@ -156,6 +156,12 @@ export const cimdOptionsType = {
 		default: "always allow",
 		description:
 			"Optional application policy evaluated before the required transport runs and before any fetch budget is consumed. It runs for each request that needs the document fetched (including requests that join an in-flight fetch) and is skipped on fresh cache hits; keep it cheap or cache its decisions if it consults an external service.",
+	},
+	metadataResolver: {
+		type: "CimdMetadataResolver",
+		default: "a resolver owned by this plugin instance",
+		description:
+			"A metadata resolver from `createCimdMetadataResolver`, shared by several discoveries. It owns the fetch and validation options, so setting `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`, `metadataFetchPolicy`, `maxCacheEntries`, or `isMetadataDocumentUrlAllowed` next to it throws. See Share one metadata cache across requests.",
 	},
 	onClientCreated: {
 		type: "(event: CimdClientCreatedEvent) => void | Promise<void>",
@@ -226,6 +232,46 @@ oauthProvider({
 ```
 
 `ClientDiscovery.id` is persisted as client provenance. A discovery can also provide the focused `fetchClientMetadataResource` seam used for metadata-owned resources.
+
+### Share one metadata cache across requests
+
+Some runtimes build the auth instance for each request, because the database handle belongs to the request. A plugin created inside that function starts every request with an empty metadata cache, no fetch budget history, and no in-flight fetches, so each request fetches the document again.
+
+To keep them across requests, create the metadata resolver once, outside the per-request code, and pass it to each plugin:
+
+```ts title="auth.ts"
+import { cimd, createCimdMetadataResolver } from "@better-auth/cimd";
+
+const metadataResolver = createCimdMetadataResolver({
+  fetchClientMetadataResource,
+  metadataFetchPolicy: { maximumFetchesPerMinute: 60 },
+  isMetadataDocumentUrlAllowed(clientIdUrl) {
+    return new URL(clientIdUrl).hostname.endsWith(".trusted.example");
+  },
+});
+
+export function createAuth(env: Env) {
+  return betterAuth({
+    // Database and the rest of your configuration for this request.
+    plugins: [
+      oauthProvider({
+        // ...
+      }),
+      cimd({ fetchClientMetadataResource, metadataResolver }),
+    ],
+  });
+}
+```
+
+The resolver fetches, validates, and caches documents. It never writes to a database. Requests that need the same document share one fetch, and each request then saves the client with its own context. If a client cannot be saved after its document was fetched, the resolver drops that cached document, so the next request fetches it again after `minimumFetchInterval`.
+
+The resolver owns every option that decides how a document is fetched and validated: `fetchClientMetadataResource`, `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`, `metadataFetchPolicy`, `maxCacheEntries`, and `isMetadataDocumentUrlAllowed`. Setting any of them except `fetchClientMetadataResource` next to `metadataResolver` throws when the plugin is created, so a setting is never ignored without notice. The plugin still needs `fetchClientMetadataResource`, because discovery-owned resources such as `jwks_uri` use it.
+
+Keep these conditions in mind when you share a resolver:
+
+* Use the same OAuth provider extensions in every discovery that shares it. The resolver validates a document with the extension fields of the request that fetched it, and serves that result to the others.
+* Share it only between instances that trust the same client IDs. Its `isMetadataDocumentUrlAllowed`, `originBoundFields`, and `metadataProfile` apply to all of them.
+* Expect a cache hit to compare the document with the client stored for that request, including the grant types and scopes the client is saved with. If the stored client is older than the cached document, for example because another request refreshed the document first, the request saves the update and calls `onClientRefreshed`.
 
 ## Related
 

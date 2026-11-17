@@ -650,6 +650,28 @@ export function createCimdResolver(cimdOptions: CimdOptions): CimdResolver {
 	const resolveMetadata =
 		sharedResolver ?? createCimdMetadataResolver(cimdOptions);
 
+	// A fetch ends before its save does, so a later fetch of the same client can
+	// finish while an earlier save is still pending. Saves for one client run in
+	// the order they were requested, so the newest document is the one stored.
+	const saveTailByClientId = new Map<string, Promise<unknown>>();
+	const saveInOrder = async <T>(
+		clientId: string,
+		save: () => Promise<T>,
+	): Promise<T> => {
+		const run = (saveTailByClientId.get(clientId) ?? Promise.resolve()).then(
+			save,
+		);
+		const tail = run.catch(() => undefined);
+		saveTailByClientId.set(clientId, tail);
+		try {
+			return await run;
+		} finally {
+			if (saveTailByClientId.get(clientId) === tail) {
+				saveTailByClientId.delete(clientId);
+			}
+		}
+	};
+
 	return async (ctx, clientId, existingClient) => {
 		const resolution = await resolveMetadata(ctx, clientId);
 		if (!resolution) return null;
@@ -673,13 +695,15 @@ export function createCimdResolver(cimdOptions: CimdOptions): CimdResolver {
 		}
 
 		try {
-			return await persistMetadataDocumentClient(
-				ctx,
-				clientId,
-				resolution.metadata,
-				cimdOptions,
-				oauthOptions,
-				existingClient ?? undefined,
+			return await saveInOrder(clientId, () =>
+				persistMetadataDocumentClient(
+					ctx,
+					clientId,
+					resolution.metadata,
+					cimdOptions,
+					oauthOptions,
+					existingClient ?? undefined,
+				),
 			);
 		} catch (error) {
 			if (!resolution.fromCache) resolution.discard();

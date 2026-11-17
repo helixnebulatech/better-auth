@@ -402,6 +402,11 @@ export function isClientCurrentWithMetadata(
 		[client.softwareId, metadata.software_id],
 		[client.softwareVersion, metadata.software_version],
 		[client.softwareStatement, metadata.software_statement],
+		[client.frontchannelLogoutUri, metadata.frontchannel_logout_uri],
+		[
+			client.frontchannelLogoutSessionRequired,
+			metadata.frontchannel_logout_session_required,
+		],
 		[client.applicationType, metadata.application_type],
 		[
 			client.tokenEndpointAuthMethod ?? "none",

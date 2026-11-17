@@ -174,6 +174,82 @@ describe("CIMD metadata resolver", () => {
 		});
 	});
 
+	/**
+	 * @see https://openid.net/specs/openid-connect-frontchannel-1_0.html#RPLogout
+	 */
+	it("refreshes the stored client when the front-channel logout URI is removed", async () => {
+		const clientId = "https://logout-removed.example/metadata.json";
+		const stale = await createRequestContext();
+		const current = await createRequestContext();
+		const documentFor = (extra: Record<string, unknown>) =>
+			sampleMetadata(clientId, extra);
+
+		const beforeDiscovery = createCimdClientDiscovery({
+			fetchClientMetadataResource: async () =>
+				documentResponse(
+					documentFor({
+						frontchannel_logout_uri: "https://client.example/logout",
+					}),
+				),
+		});
+		await beforeDiscovery.resolve(stale.ctx, clientId, null);
+		const staleClient = await stale.readClient(clientId);
+		expect(staleClient?.frontchannelLogoutUri).toBeTruthy();
+
+		const resolver = createCimdMetadataResolver({
+			fetchClientMetadataResource: async () =>
+				documentResponse(documentFor({})),
+		});
+		const discovery = createCimdClientDiscovery({ metadataResolver: resolver });
+		await discovery.resolve(current.ctx, clientId, null);
+		await discovery.resolve(stale.ctx, clientId, staleClient);
+
+		expect(
+			(await stale.readClient(clientId))?.frontchannelLogoutUri,
+		).toBeFalsy();
+	});
+
+	/**
+	 * A fetch ends before its save does, so two requests can overlap.
+	 */
+	it("keeps the newest document when an older save finishes last", async () => {
+		const clientId = "https://ordered-save.example/metadata.json";
+		const names = ["Seed", "Older", "Newer"];
+		const fetchClientMetadataResource = vi.fn(async () =>
+			documentResponse(
+				sampleMetadata(clientId, { client_name: names.shift() }),
+				"no-cache",
+			),
+		);
+		const discovery = createCimdClientDiscovery({
+			fetchClientMetadataResource,
+			metadataFetchPolicy: { minimumFetchInterval: 0 },
+		});
+		const { ctx, readClient } = await createRequestContext();
+		const seeded = await discovery.resolve(ctx, clientId, null);
+
+		const { adapter } = ctx.context;
+		const transaction = adapter.transaction.bind(adapter);
+		const olderSaveGate = deferred<void>();
+		let saves = 0;
+		vi.spyOn(adapter, "transaction").mockImplementation(async (run) => {
+			saves += 1;
+			if (saves === 1) await olderSaveGate.promise;
+			return transaction(run);
+		});
+
+		const older = discovery.resolve(ctx, clientId, seeded);
+		await vi.waitFor(() => expect(saves).toBe(1));
+		const newer = discovery.resolve(ctx, clientId, seeded);
+		await vi.waitFor(() =>
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(3),
+		);
+		olderSaveGate.resolve();
+		await Promise.all([older, newer]);
+
+		expect((await readClient(clientId))?.name).toBe("Newer");
+	});
+
 	describe("createCimdMetadataResolver", () => {
 		it("resolves a document and then answers from the cache", async () => {
 			const clientId = "https://standalone.example/metadata.json";
@@ -514,6 +590,12 @@ describe("CIMD metadata resolver", () => {
 				["dpop_bound_access_tokens", true, false],
 				["require_pushed_authorization_requests", false, true],
 				["subject_type", "public", "pairwise"],
+				[
+					"frontchannel_logout_uri",
+					"https://client.example/logout-a",
+					"https://client.example/logout-b",
+				],
+				["frontchannel_logout_session_required", false, true],
 			];
 
 			it.each(fieldChanges)(

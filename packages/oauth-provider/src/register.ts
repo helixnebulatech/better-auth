@@ -1340,6 +1340,10 @@ async function persistOAuthClientRegistration(
 					],
 					update: {
 						...refreshed,
+						// A document that drops its logout URI removes it.
+						frontchannelLogoutUri: schema.frontchannelLogoutUri ?? null,
+						frontchannelLogoutSessionRequired:
+							schema.frontchannelLogoutSessionRequired ?? null,
 						metadata,
 						// A client stored without a sector keeps the host-derived one.
 						sectorIdentifier: existingClient.sectorIdentifier

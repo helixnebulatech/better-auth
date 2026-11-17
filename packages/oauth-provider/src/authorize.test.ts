@@ -2299,40 +2299,28 @@ describe("oauth authorize - error destinations and order", async () => {
  */
 describe("oauth authorize - default scopes when scope is omitted", async () => {
 	const authServerBaseUrl = "http://localhost:3000";
-	const { auth, signInWithTestUser, customFetchImpl } = await getTestInstance({
-		baseURL: authServerBaseUrl,
-		plugins: [
-			oauthProvider({
-				loginPage: "/login",
-				consentPage: "/consent",
-				allowDynamicClientRegistration: true,
-				scopes: ["openid", "profile", "files:read", "members:write"],
-				clientRegistrationDefaultScopes: ["openid", "files:read"],
-				clientRegistrationAllowedScopes: [
-					"openid",
-					"files:read",
-					"members:write",
-				],
-			}),
-			jwt(),
-		],
-	});
+	const { auth, signInWithTestUser, client } = await getTestInstance(
+		{
+			baseURL: authServerBaseUrl,
+			plugins: [
+				oauthProvider({
+					loginPage: "/login",
+					consentPage: "/consent",
+					allowDynamicClientRegistration: true,
+					scopes: ["openid", "profile", "files:read", "members:write"],
+					clientRegistrationDefaultScopes: ["openid", "files:read"],
+					clientRegistrationAllowedScopes: [
+						"openid",
+						"files:read",
+						"members:write",
+					],
+				}),
+				jwt(),
+			],
+		},
+		{ clientOptions: { plugins: [oauthProviderClient()] } },
+	);
 	const { headers } = await signInWithTestUser();
-	const client = createAuthClient({
-		plugins: [oauthProviderClient()],
-		baseURL: authServerBaseUrl,
-		fetchOptions: {
-			customFetchImpl,
-			headers,
-		},
-	});
-	const unauthenticatedClient = createAuthClient({
-		plugins: [oauthProviderClient()],
-		baseURL: authServerBaseUrl,
-		fetchOptions: {
-			customFetchImpl,
-		},
-	});
 
 	async function assignedScopeFor(clientId: string) {
 		const authUrl = new URL(`${authServerBaseUrl}/api/auth/oauth2/authorize`);
@@ -2345,7 +2333,7 @@ describe("oauth authorize - default scopes when scope is omitted", async () => {
 		}).toString();
 
 		let loginRedirectUrl = "";
-		await unauthenticatedClient.$fetch(authUrl.toString(), {
+		await client.$fetch(authUrl.toString(), {
 			onError(context) {
 				loginRedirectUrl = context.response.headers.get("Location") || "";
 			},
@@ -2356,11 +2344,14 @@ describe("oauth authorize - default scopes when scope is omitted", async () => {
 	}
 
 	it("falls back to the operator default scopes, not the client's whole persisted set", async () => {
-		const registered = await client.oauth2.register({
-			redirect_uris: ["http://localhost:5000/callback"],
-			token_endpoint_auth_method: "client_secret_post",
-			application_type: "native",
-		});
+		const registered = await client.oauth2.register(
+			{
+				redirect_uris: ["http://localhost:5000/callback"],
+				token_endpoint_auth_method: "client_secret_post",
+				application_type: "native",
+			},
+			{ headers },
+		);
 		expect(registered.error).toBeNull();
 		// Registration persists the union of defaults and allowed scopes as the
 		// client's capability set.
@@ -2376,11 +2367,14 @@ describe("oauth authorize - default scopes when scope is omitted", async () => {
 	});
 
 	it("intersects the defaults with a narrowed persisted set", async () => {
-		const registered = await client.oauth2.register({
-			redirect_uris: ["http://localhost:5000/callback"],
-			token_endpoint_auth_method: "client_secret_post",
-			application_type: "native",
-		});
+		const registered = await client.oauth2.register(
+			{
+				redirect_uris: ["http://localhost:5000/callback"],
+				token_endpoint_auth_method: "client_secret_post",
+				application_type: "native",
+			},
+			{ headers },
+		);
 		expect(registered.error).toBeNull();
 		// The operator later narrows the client's persisted set, dropping one of
 		// the default scopes it was registered with.
@@ -2402,47 +2396,38 @@ describe("oauth authorize - default scopes when scope is omitted", async () => {
  */
 describe("oauth authorize - empty registration default scopes", async () => {
 	const authServerBaseUrl = "http://localhost:3000";
-	const { signInWithTestUser, customFetchImpl } = await getTestInstance({
-		baseURL: authServerBaseUrl,
-		plugins: [
-			oauthProvider({
-				loginPage: "/login",
-				consentPage: "/consent",
-				allowDynamicClientRegistration: true,
-				scopes: ["openid", "profile", "files:read", "members:write"],
-				clientRegistrationDefaultScopes: [],
-				clientRegistrationAllowedScopes: [
-					"openid",
-					"files:read",
-					"members:write",
-				],
-			}),
-			jwt(),
-		],
-	});
+	const { signInWithTestUser, client } = await getTestInstance(
+		{
+			baseURL: authServerBaseUrl,
+			plugins: [
+				oauthProvider({
+					loginPage: "/login",
+					consentPage: "/consent",
+					allowDynamicClientRegistration: true,
+					scopes: ["openid", "profile", "files:read", "members:write"],
+					clientRegistrationDefaultScopes: [],
+					clientRegistrationAllowedScopes: [
+						"openid",
+						"files:read",
+						"members:write",
+					],
+				}),
+				jwt(),
+			],
+		},
+		{ clientOptions: { plugins: [oauthProviderClient()] } },
+	);
 	const { headers } = await signInWithTestUser();
-	const client = createAuthClient({
-		plugins: [oauthProviderClient()],
-		baseURL: authServerBaseUrl,
-		fetchOptions: {
-			customFetchImpl,
-			headers,
-		},
-	});
-	const unauthenticatedClient = createAuthClient({
-		plugins: [oauthProviderClient()],
-		baseURL: authServerBaseUrl,
-		fetchOptions: {
-			customFetchImpl,
-		},
-	});
 
 	it("assigns no scopes when the operator configured an empty default list", async () => {
-		const registered = await client.oauth2.register({
-			redirect_uris: ["http://localhost:5000/callback"],
-			token_endpoint_auth_method: "client_secret_post",
-			application_type: "native",
-		});
+		const registered = await client.oauth2.register(
+			{
+				redirect_uris: ["http://localhost:5000/callback"],
+				token_endpoint_auth_method: "client_secret_post",
+				application_type: "native",
+			},
+			{ headers },
+		);
 		expect(registered.error).toBeNull();
 
 		const authUrl = new URL(`${authServerBaseUrl}/api/auth/oauth2/authorize`);
@@ -2455,7 +2440,7 @@ describe("oauth authorize - empty registration default scopes", async () => {
 		}).toString();
 
 		let loginRedirectUrl = "";
-		await unauthenticatedClient.$fetch(authUrl.toString(), {
+		await client.$fetch(authUrl.toString(), {
 			onError(context) {
 				loginRedirectUrl = context.response.headers.get("Location") || "";
 			},
@@ -2470,25 +2455,21 @@ describe("oauth authorize - empty registration default scopes", async () => {
 describe("oauth authorize - scope omitted without registration default scopes", async () => {
 	const authServerBaseUrl = "http://localhost:3000";
 	const redirectUri = "http://localhost:5000/callback";
-	const { auth, signInWithTestUser, customFetchImpl } = await getTestInstance({
-		baseURL: authServerBaseUrl,
-		plugins: [
-			oauthProvider({
-				loginPage: "/login",
-				consentPage: "/consent",
-				scopes: ["openid", "profile", "files:read", "members:write"],
-			}),
-			jwt(),
-		],
-	});
-	const { headers } = await signInWithTestUser();
-	const unauthenticatedClient = createAuthClient({
-		plugins: [oauthProviderClient()],
-		baseURL: authServerBaseUrl,
-		fetchOptions: {
-			customFetchImpl,
+	const { auth, signInWithTestUser, client } = await getTestInstance(
+		{
+			baseURL: authServerBaseUrl,
+			plugins: [
+				oauthProvider({
+					loginPage: "/login",
+					consentPage: "/consent",
+					scopes: ["openid", "profile", "files:read", "members:write"],
+				}),
+				jwt(),
+			],
 		},
-	});
+		{ clientOptions: { plugins: [oauthProviderClient()] } },
+	);
+	const { headers } = await signInWithTestUser();
 
 	async function assignedScopeFor(clientId: string, scope?: string) {
 		const authUrl = new URL(`${authServerBaseUrl}/api/auth/oauth2/authorize`);
@@ -2502,7 +2483,7 @@ describe("oauth authorize - scope omitted without registration default scopes", 
 		}).toString();
 
 		let loginRedirectUrl = "";
-		await unauthenticatedClient.$fetch(authUrl.toString(), {
+		await client.$fetch(authUrl.toString(), {
 			onError(context) {
 				loginRedirectUrl = context.response.headers.get("Location") || "";
 			},

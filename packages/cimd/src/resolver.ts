@@ -681,9 +681,12 @@ export function createCimdResolver(cimdOptions: CimdOptions): CimdResolver {
 		// saved through another database, so a cache hit cannot vouch for this
 		// database's row. An owned resolver only caches what its own discovery
 		// saved, so a hit does.
+		// A save still pending for this client means the cached document is newer
+		// than the row, so the row is not current yet.
 		if (
 			resolution.fromCache &&
 			existingClient &&
+			!saveTailByClientId.has(clientId) &&
 			(!sharedResolver ||
 				isClientCurrentWithMetadata(
 					existingClient,
@@ -706,7 +709,10 @@ export function createCimdResolver(cimdOptions: CimdOptions): CimdResolver {
 				),
 			);
 		} catch (error) {
-			if (!resolution.fromCache) resolution.discard();
+			// A shared resolver's cache hits compare each request's stored row with
+			// the document, so a failed save here is retried without a refetch and
+			// must not evict the document for the other requests.
+			if (!resolution.fromCache && !sharedResolver) resolution.discard();
 			throw error;
 		}
 	};

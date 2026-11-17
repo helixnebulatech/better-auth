@@ -366,8 +366,9 @@ function isSameList(
 	stored: readonly string[] | null | undefined,
 	registered: readonly string[] | null | undefined,
 ): boolean {
-	const storedEntries = new Set(stored ?? []);
-	const registeredEntries = new Set(registered ?? []);
+	// A client saved with no scopes stores [""], which `"".split(" ")` yields.
+	const storedEntries = new Set((stored ?? []).filter(Boolean));
+	const registeredEntries = new Set((registered ?? []).filter(Boolean));
 	return (
 		storedEntries.size === registeredEntries.size &&
 		[...storedEntries].every((entry) => registeredEntries.has(entry))

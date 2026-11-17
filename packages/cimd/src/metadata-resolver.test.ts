@@ -175,6 +175,91 @@ describe("CIMD metadata resolver", () => {
 	});
 
 	/**
+	 * A refresh must not keep a value the document no longer lists.
+	 *
+	 * @see https://datatracker.ietf.org/doc/html/draft-ietf-oauth-client-id-metadata-document
+	 */
+	it("clears every stored field that the document stops listing", async () => {
+		const clientId = "https://fields-removed.example/metadata.json";
+		const stale = await createRequestContext();
+		const current = await createRequestContext();
+		const jwks = {
+			keys: [
+				{
+					kty: "EC",
+					crv: "P-256",
+					x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+					y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+					kid: "gone",
+					alg: "ES256",
+					use: "sig",
+				},
+			],
+		};
+		const listed = sampleMetadata(clientId, {
+			client_name: "Listed",
+			client_uri: "https://fields-removed.example/about",
+			logo_uri: "https://fields-removed.example/logo.png",
+			tos_uri: "https://fields-removed.example/tos",
+			policy_uri: "https://fields-removed.example/policy",
+			software_id: "listed-app",
+			software_version: "1.0.0",
+			contacts: ["owner@fields-removed.example"],
+			token_endpoint_auth_method: "private_key_jwt",
+			jwks,
+			frontchannel_logout_uri: "https://client.example/logout",
+			frontchannel_logout_session_required: true,
+		});
+		await createCimdClientDiscovery({
+			fetchClientMetadataResource: async () => documentResponse(listed),
+		}).resolve(stale.ctx, clientId, null);
+		const staleClient = await stale.readClient(clientId);
+		expect(staleClient).toMatchObject({
+			name: "Listed",
+			uri: "https://fields-removed.example/about",
+			softwareId: "listed-app",
+		});
+
+		const bare = {
+			client_id: clientId,
+			redirect_uris: ["https://client.example/callback"],
+		};
+		const resolver = createCimdMetadataResolver({
+			fetchClientMetadataResource: async () => documentResponse(bare),
+		});
+		const discovery = createCimdClientDiscovery({
+			metadataResolver: resolver,
+		});
+		await discovery.resolve(current.ctx, clientId, null);
+		await discovery.resolve(stale.ctx, clientId, staleClient);
+
+		const refreshed = await stale.readClient(clientId);
+		for (const field of [
+			"name",
+			"uri",
+			"icon",
+			"tos",
+			"policy",
+			"softwareId",
+			"softwareVersion",
+			"jwks",
+			"frontchannelLogoutUri",
+			"frontchannelLogoutSessionRequired",
+		] as const) {
+			expect(refreshed?.[field], field).toBeFalsy();
+		}
+		expect(refreshed?.contacts ?? []).toEqual([]);
+		// A second cache hit finds the row current and saves nothing.
+		const onClientRefreshed = vi.fn();
+		const again = await createCimdClientDiscovery({
+			metadataResolver: resolver,
+			onClientRefreshed,
+		}).resolve(stale.ctx, clientId, refreshed);
+		expect(again).toBe(refreshed);
+		expect(onClientRefreshed).not.toHaveBeenCalled();
+	});
+
+	/**
 	 * @see https://openid.net/specs/openid-connect-frontchannel-1_0.html#RPLogout
 	 */
 	it("refreshes the stored client when the front-channel logout URI is removed", async () => {
@@ -374,14 +459,38 @@ describe("CIMD metadata resolver", () => {
 			const requestA = await createRequestContext();
 			const requestB = await createRequestContext();
 
-			await resolve(requestA.ctx, clientId);
-			await resolve(requestB.ctx, clientId);
+			await Promise.all([
+				resolve(requestA.ctx, clientId),
+				resolve(requestB.ctx, clientId),
+			]);
 
-			expect(isMetadataDocumentUrlAllowed).toHaveBeenCalledTimes(1);
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(1);
 			expect(isMetadataDocumentUrlAllowed).toHaveBeenCalledWith(
 				clientId,
 				requestA.ctx,
 			);
+			expect(isMetadataDocumentUrlAllowed).toHaveBeenCalledWith(
+				clientId,
+				requestB.ctx,
+			);
+		});
+
+		it("does not run the URL policy for a fresh cache hit", async () => {
+			const clientId = "https://policy-hit.example/metadata.json";
+			const isMetadataDocumentUrlAllowed = vi.fn<
+				NonNullable<CimdOptions["isMetadataDocumentUrlAllowed"]>
+			>(async () => true);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource: async () =>
+					documentResponse(sampleMetadata(clientId)),
+				isMetadataDocumentUrlAllowed,
+			});
+			const { ctx } = await createRequestContext();
+
+			await resolve(ctx, clientId);
+			await resolve(ctx, clientId);
+
+			expect(isMetadataDocumentUrlAllowed).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -429,6 +538,28 @@ describe("CIMD metadata resolver", () => {
 			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(1);
 			expect((await requestA.readClient(clientId))?.clientId).toBe(clientId);
 			expect((await requestB.readClient(clientId))?.clientId).toBe(clientId);
+		});
+
+		it("keeps the cached document when one request cannot save it", async () => {
+			const clientId = "https://shared-failed-save.example/metadata.json";
+			const fetchClientMetadataResource = vi.fn(async () =>
+				documentResponse(sampleMetadata(clientId)),
+			);
+			const discovery = discoveryFor(
+				createCimdMetadataResolver({ fetchClientMetadataResource }),
+			);
+			const broken = await createRequestContext({
+				grantTypes: ["client_credentials"],
+			});
+			const healthy = await createRequestContext();
+
+			await expect(
+				discovery.resolve(broken.ctx, clientId, null),
+			).rejects.toMatchObject({ body: { error: "invalid_client_metadata" } });
+			const client = await discovery.resolve(healthy.ctx, clientId, null);
+
+			expect(client?.clientId).toBe(clientId);
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(1);
 		});
 
 		it("applies the policy set on the resolver to a discovery that uses it", async () => {
@@ -706,6 +837,26 @@ describe("CIMD metadata resolver", () => {
 				expect(onClientRefreshed).not.toHaveBeenCalled();
 			});
 
+			it("does not save again when the provider has no scopes", async () => {
+				const clientId = "https://reconcile.example/no-scopes.json";
+				const onClientRefreshed = vi.fn();
+				const discovery = discoveryFor(
+					createCimdMetadataResolver({
+						fetchClientMetadataResource: async () =>
+							documentResponse(sampleMetadata(clientId)),
+					}),
+					{ onClientRefreshed },
+				);
+				const request = await createRequestContext({ scopes: [] });
+
+				await discovery.resolve(request.ctx, clientId, null);
+				const stored = await request.readClient(clientId);
+				const again = await discovery.resolve(request.ctx, clientId, stored);
+
+				expect(again).toBe(stored);
+				expect(onClientRefreshed).not.toHaveBeenCalled();
+			});
+
 			it("does not save again a client for a minimal document", async () => {
 				const clientId = "https://reconcile.example/minimal.json";
 				const onClientRefreshed = vi.fn();
@@ -832,6 +983,52 @@ describe("CIMD metadata resolver", () => {
 	});
 
 	describe("discovery without a shared resolver", () => {
+		/**
+		 * A document is cached before its save commits, so a cache hit in that
+		 * window must not answer with the row the save is about to replace.
+		 */
+		it("does not answer a cache hit with a row that a pending save replaces", async () => {
+			const clientId = "https://pending-save.example/metadata.json";
+			const responses = [
+				documentResponse(
+					sampleMetadata(clientId, { client_name: "Seed" }),
+					"max-age=0",
+				),
+				documentResponse(sampleMetadata(clientId, { client_name: "Newer" })),
+			];
+			const fetchClientMetadataResource = vi.fn(async () => {
+				const response = responses.shift();
+				if (!response) throw new Error("unexpected fetch");
+				return response;
+			});
+			const discovery = createCimdClientDiscovery({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 0 },
+			});
+			const { ctx, readClient } = await createRequestContext();
+			const seeded = await discovery.resolve(ctx, clientId, null);
+
+			const { adapter } = ctx.context;
+			const transaction = adapter.transaction.bind(adapter);
+			const saveGate = deferred<void>();
+			let saves = 0;
+			vi.spyOn(adapter, "transaction").mockImplementation(async (run) => {
+				saves += 1;
+				if (saves === 1) await saveGate.promise;
+				return transaction(run);
+			});
+
+			const fetching = discovery.resolve(ctx, clientId, seeded);
+			await vi.waitFor(() => expect(saves).toBe(1));
+			const hitting = discovery.resolve(ctx, clientId, seeded);
+			saveGate.resolve();
+			const [, hit] = await Promise.all([fetching, hitting]);
+
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
+			expect(hit?.name).toBe("Newer");
+			expect((await readClient(clientId))?.name).toBe("Newer");
+		});
+
 		it("returns the stored client on a cache hit", async () => {
 			const clientId = "https://owned.example/metadata.json";
 			const fetchClientMetadataResource = vi.fn(async () =>

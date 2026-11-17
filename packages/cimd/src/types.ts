@@ -13,8 +13,10 @@ export interface CimdMetadataResolution {
 	/** Validated document. A copy: changing it does not change the cache. */
 	metadata: OAuthClientMetadata;
 	/**
-	 * Whether an unexpired cache entry answered, so the origin was not
-	 * contacted for this request.
+	 * Whether an unexpired cache entry answered at once, so the request neither
+	 * fetched nor waited for a fetch. It is `false` when the request fetched the
+	 * document, joined a fetch, or found a document another request cached while
+	 * the URL policy ran.
 	 */
 	fromCache: boolean;
 	/**

@@ -1336,7 +1336,7 @@ async function persistOAuthClientRegistration(
 						metadata = merged && Object.keys(merged).length > 0 ? merged : null;
 					}
 				}
-				// Server-owned fields (disabled, consent and logout settings, the
+				// Server-owned fields (disabled, consent, end-session, the
 				// ceiling) can change while this refresh fetches metadata, so the
 				// refresh never writes them.
 				const {

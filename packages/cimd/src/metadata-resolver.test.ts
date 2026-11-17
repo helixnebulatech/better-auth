@@ -213,6 +213,7 @@ describe("CIMD metadata resolver", () => {
 			contacts: ["owner@fields-removed.example"],
 			token_endpoint_auth_method: "private_key_jwt",
 			jwks,
+			post_logout_redirect_uris: ["https://fields-removed.example/signed-out"],
 			frontchannel_logout_uri: "https://client.example/logout",
 			frontchannel_logout_session_required: true,
 		});
@@ -224,6 +225,7 @@ describe("CIMD metadata resolver", () => {
 			name: "Listed",
 			uri: "https://fields-removed.example/about",
 			softwareId: "listed-app",
+			postLogoutRedirectUris: ["https://fields-removed.example/signed-out"],
 		});
 
 		const bare = {
@@ -256,6 +258,7 @@ describe("CIMD metadata resolver", () => {
 			expect(refreshed?.[field], field).toBeFalsy();
 		}
 		expect(refreshed?.contacts ?? []).toEqual([]);
+		expect(refreshed?.postLogoutRedirectUris ?? []).toEqual([]);
 		// A second cache hit finds the row current and saves nothing.
 		const onClientRefreshed = vi.fn();
 		const again = await createCimdClientDiscovery({

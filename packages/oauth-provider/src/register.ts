@@ -154,6 +154,7 @@ const METADATA_DOCUMENT_CLIENT_FIELDS = [
 	"softwareId",
 	"softwareVersion",
 	"softwareStatement",
+	"postLogoutRedirectUris",
 	"frontchannelLogoutUri",
 	"frontchannelLogoutSessionRequired",
 ] as const satisfies readonly (keyof SchemaClient<Scope[]>)[];

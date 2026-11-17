@@ -141,6 +141,23 @@ function applyOAuthClientRegistrationDefaults(
 	};
 }
 
+/** Client fields that a metadata document sets and a refresh clears when it omits them. */
+const METADATA_DOCUMENT_CLIENT_FIELDS = [
+	"name",
+	"uri",
+	"icon",
+	"tos",
+	"policy",
+	"contacts",
+	"jwks",
+	"jwksUri",
+	"softwareId",
+	"softwareVersion",
+	"softwareStatement",
+	"frontchannelLogoutUri",
+	"frontchannelLogoutSessionRequired",
+] as const satisfies readonly (keyof SchemaClient<Scope[]>)[];
+
 /**
  * The grant types, response types, and scopes a client saved from a Client ID
  * Metadata Document carries. A list the document omits takes the registration
@@ -1329,6 +1346,14 @@ async function persistOAuthClientRegistration(
 					enableEndSession: _enableEndSession,
 					...refreshed
 				} = schema;
+				// An update skips undefined values, so a field the document no longer
+				// lists is cleared explicitly.
+				const omittedDocumentFields = Object.fromEntries(
+					METADATA_DOCUMENT_CLIENT_FIELDS.map((field) => [
+						field,
+						refreshed[field] ?? null,
+					]),
+				);
 				const updatedClient = await adapter.update<SchemaClient<Scope[]>>({
 					model: clientModel,
 					where: [
@@ -1340,10 +1365,7 @@ async function persistOAuthClientRegistration(
 					],
 					update: {
 						...refreshed,
-						// A document that drops its logout URI removes it.
-						frontchannelLogoutUri: schema.frontchannelLogoutUri ?? null,
-						frontchannelLogoutSessionRequired:
-							schema.frontchannelLogoutSessionRequired ?? null,
+						...omittedDocumentFields,
 						metadata,
 						// A client stored without a sector keeps the host-derived one.
 						sectorIdentifier: existingClient.sectorIdentifier

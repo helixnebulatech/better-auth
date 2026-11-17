@@ -35,6 +35,12 @@ function sampleMetadata(clientId: string, extra: Record<string, unknown> = {}) {
 	};
 }
 
+const unusedTransport: NonNullable<
+	CimdOptions["fetchClientMetadataResource"]
+> = async () => {
+	throw new Error("discovery-owned resources are not fetched in this test");
+};
+
 function documentResponse(body: unknown, cacheControl = "max-age=3600") {
 	return Response.json(body, {
 		headers: { "cache-control": cacheControl },
@@ -228,6 +234,7 @@ describe("CIMD metadata resolver", () => {
 			fetchClientMetadataResource: async () => documentResponse(bare),
 		});
 		const discovery = createCimdClientDiscovery({
+			fetchClientMetadataResource: unusedTransport,
 			metadataResolver: resolver,
 		});
 		await discovery.resolve(current.ctx, clientId, null);
@@ -252,6 +259,7 @@ describe("CIMD metadata resolver", () => {
 		// A second cache hit finds the row current and saves nothing.
 		const onClientRefreshed = vi.fn();
 		const again = await createCimdClientDiscovery({
+			fetchClientMetadataResource: unusedTransport,
 			metadataResolver: resolver,
 			onClientRefreshed,
 		}).resolve(stale.ctx, clientId, refreshed);
@@ -285,7 +293,10 @@ describe("CIMD metadata resolver", () => {
 			fetchClientMetadataResource: async () =>
 				documentResponse(documentFor({})),
 		});
-		const discovery = createCimdClientDiscovery({ metadataResolver: resolver });
+		const discovery = createCimdClientDiscovery({
+			fetchClientMetadataResource: unusedTransport,
+			metadataResolver: resolver,
+		});
 		await discovery.resolve(current.ctx, clientId, null);
 		await discovery.resolve(stale.ctx, clientId, staleClient);
 

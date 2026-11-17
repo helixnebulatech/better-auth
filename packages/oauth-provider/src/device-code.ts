@@ -16,6 +16,7 @@ import {
 	redeemDeviceCode,
 } from "better-auth/plugins/device-authorization";
 import * as z from "zod";
+import { normalizeClientAuthenticationParameters } from "./client-authentication";
 import { extendOAuthProvider } from "./extensions";
 import { resolveResourcePolicy } from "./resources";
 import { checkDpopProofBeforeConsume, getOAuthProviderApi } from "./token";
@@ -31,7 +32,6 @@ import {
 	getAuthEndpointUrl,
 	getClient,
 	getOAuthProviderPlugin,
-	normalizeClientAuthenticationParameters,
 	normalizeTimestampValue,
 	parseScopes,
 	readFormParams,

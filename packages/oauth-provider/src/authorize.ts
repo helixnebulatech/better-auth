@@ -17,6 +17,7 @@ import {
 	getRequestedUserInfoClaims,
 	isValidOidcClaimsRequest,
 } from "./claims-request";
+import { clientAllowsGrant } from "./client-authentication";
 import { getExtensionInteractionRequest } from "./extensions";
 import { oauthAuthorizationServerMetadata } from "./metadata";
 import { oAuthState } from "./oauth";
@@ -54,7 +55,6 @@ import type {
 import { authorizationQuerySchema, RedirectUriSyntaxSchema } from "./types/zod";
 
 import {
-	clientAllowsGrant,
 	consentCovers,
 	findConsent,
 	getClient,

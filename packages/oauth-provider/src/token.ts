@@ -24,6 +24,12 @@ import {
 } from "./claims";
 import { getRequestedUserInfoClaims } from "./claims-request";
 import {
+	clientAllowsGrant,
+	destructureCredentials,
+	extractClientCredentials,
+	validateClientCredentials,
+} from "./client-authentication";
+import {
 	challengeEndpointDpopNonce,
 	getDpopProofJwt,
 	getEndpointUrl,
@@ -72,10 +78,7 @@ import {
 } from "./types/zod";
 import {
 	assertConfirmation,
-	clientAllowsGrant,
 	decryptStoredClientSecret,
-	destructureCredentials,
-	extractClientCredentials,
 	getAuthEndpointUrl,
 	getClient,
 	getJwtPlugin,
@@ -90,7 +93,6 @@ import {
 	storeToken,
 	toAudienceClaim,
 	toResourceList,
-	validateClientCredentials,
 	validateClientScopes,
 } from "./utils";
 

@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { atom } from "nanostores";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { organizationClient } from "../plugins/organization/client";
 import { getClientConfig } from "./config";
@@ -34,8 +35,13 @@ describe("createDynamicPathProxy", () => {
 
 	it("triggers $sessionSignal toggle through the proxy on /change-password", async () => {
 		const client = vi.fn(async (path, options) => {
-			if (options?.onSuccess) {
-				await options.onSuccess({} as any);
+			// Mirror better-fetch, which runs every onResponse hook before any onSuccess hook.
+			const hooks = (options?.plugins ?? []).map((plugin: any) => plugin.hooks);
+			for (const hook of hooks) {
+				await hook?.onResponse?.({ response: new Response() });
+			}
+			for (const hook of hooks) {
+				await hook?.onSuccess?.({});
 			}
 			return {
 				data: {},
@@ -79,8 +85,13 @@ describe("createDynamicPathProxy", () => {
 
 	it("should avoid duplicate signal processing", async () => {
 		const client = vi.fn(async (path, options) => {
-			if (options?.onSuccess) {
-				await options.onSuccess({} as any);
+			// Mirror better-fetch, which runs every onResponse hook before any onSuccess hook.
+			const hooks = (options?.plugins ?? []).map((plugin: any) => plugin.hooks);
+			for (const hook of hooks) {
+				await hook?.onResponse?.({ response: new Response() });
+			}
+			for (const hook of hooks) {
+				await hook?.onSuccess?.({});
 			}
 			return {
 				data: {},
@@ -176,6 +187,52 @@ describe("createDynamicPathProxy", () => {
 
 		await proxy.organization.setActive();
 		await vi.waitFor(() => expect(updates).toHaveBeenCalledTimes(3));
+	});
+
+	it("refreshes every matched signal when a listener callback throws", async () => {
+		const failure = new Error("callback failed");
+		const { $fetch, pluginPathMethods, pluginsAtoms, atomListeners } =
+			getClientConfig({
+				baseURL: "http://localhost:3000",
+				fetchOptions: {
+					customFetchImpl: async () => Response.json({}),
+				},
+				plugins: [
+					{
+						id: "listeners",
+						getAtoms: () => ({
+							$first: atom(false),
+							$second: atom(false),
+						}),
+						atomListeners: [
+							{
+								signal: "$first",
+								matcher: (path) => path === "/sign-in/email",
+								callback() {
+									throw failure;
+								},
+							},
+							{
+								signal: "$second",
+								matcher: (path) => path === "/sign-in/email",
+							},
+						],
+					},
+				],
+			});
+		const updates = vi.fn();
+		onTestFinished(pluginsAtoms.$second!.listen(updates));
+
+		const proxy = createDynamicPathProxy(
+			{} as { signIn: { email: () => Promise<unknown> } },
+			$fetch,
+			pluginPathMethods,
+			pluginsAtoms,
+			atomListeners,
+		);
+
+		await expect(proxy.signIn.email()).rejects.toBe(failure);
+		expect(updates).toHaveBeenCalledTimes(1);
 	});
 
 	/**

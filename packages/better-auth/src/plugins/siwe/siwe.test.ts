@@ -1551,3 +1551,10 @@ describe("siwe", async () => {
 		});
 	});
 });
+
+it("refreshes the session after a wallet sign-in", () => {
+	const listener = siweClient().atomListeners.find(
+		({ signal }) => signal === "$sessionSignal",
+	);
+	expect(listener?.matcher("/siwe/verify")).toBe(true);
+});

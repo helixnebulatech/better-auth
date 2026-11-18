@@ -302,4 +302,128 @@ describe("passkey client", () => {
 		expect(listPasskeys.set).toHaveBeenCalled();
 		expect(store.notify).not.toHaveBeenCalledWith("$sessionSignal");
 	});
+
+	describe("session refresh after sign-in", () => {
+		const signInFetch = (verified: unknown) =>
+			vi.fn(async (path: string) => {
+				if (path === "/passkey/generate-authenticate-options") {
+					return {
+						data: {
+							challenge: "challenge",
+							rpId: "example.com",
+						},
+					};
+				}
+				if (path === "/passkey/verify-authentication") return verified;
+				return { data: null };
+			});
+
+		function passkeyActions(verified: unknown, notify = vi.fn()) {
+			mocks.startAuthentication.mockResolvedValue({
+				clientExtensionResults: {},
+			});
+			return getPasskeyActions(signInFetch(verified) as any, {
+				$listPasskeys: { set: vi.fn() } as any,
+				$store: { notify } as any,
+			});
+		}
+
+		const signedIn = {
+			data: {
+				session: { id: "session" },
+				user: { id: "user" },
+			},
+			error: null,
+		};
+
+		it("resolves once the session reflects the sign-in", async () => {
+			let release!: () => void;
+			const notify = vi.fn(
+				() =>
+					new Promise<void>((resolve) => {
+						release = resolve;
+					}),
+			);
+			const signIn = passkeyActions(signedIn, notify).signIn.passkey();
+			let resolved = false;
+			void signIn.then(() => {
+				resolved = true;
+			});
+
+			await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+			await new Promise((resolve) => setTimeout(resolve));
+			expect(resolved).toBe(false);
+			release();
+			await signIn;
+		});
+
+		it("resolves a registration that creates a session once the session reflects it", async () => {
+			let release!: () => void;
+			const notify = vi.fn(
+				() =>
+					new Promise<void>((resolve) => {
+						release = resolve;
+					}),
+			);
+			mocks.startRegistration.mockResolvedValue({
+				clientExtensionResults: {},
+				response: {},
+			});
+			const fetchMock = vi.fn(async (path: string) => {
+				if (path === "/passkey/generate-register-options") {
+					return {
+						data: {
+							challenge: "challenge",
+							rp: { name: "Test", id: "example.com" },
+							user: { id: "user", name: "user" },
+							pubKeyCredParams: [],
+						},
+					};
+				}
+				return {
+					data: {
+						id: "passkey-id",
+						session: { id: "session" },
+					},
+				};
+			});
+			const actions = getPasskeyActions(fetchMock as any, {
+				$listPasskeys: { set: vi.fn() } as any,
+				$store: { notify } as any,
+			});
+			const registration = actions.passkey.addPasskey({ createSession: true });
+			let resolved = false;
+			void registration.then(() => {
+				resolved = true;
+			});
+
+			await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+			await new Promise((resolve) => setTimeout(resolve));
+			expect(resolved).toBe(false);
+			release();
+			await registration;
+		});
+
+		it("does not refresh the session when verification fails", async () => {
+			const notify = vi.fn();
+			await passkeyActions(
+				{
+					data: null,
+					error: { status: 400, message: "invalid" },
+				},
+				notify,
+			).signIn.passkey();
+
+			expect(notify).not.toHaveBeenCalled();
+		});
+
+		it("does not refresh the session when the signal is disabled", async () => {
+			const notify = vi.fn();
+			await passkeyActions(signedIn, notify).signIn.passkey(undefined, {
+				disableSignal: true,
+			});
+
+			expect(notify).not.toHaveBeenCalled();
+		});
+	});
 });

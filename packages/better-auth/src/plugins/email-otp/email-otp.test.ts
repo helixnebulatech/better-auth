@@ -3124,3 +3124,10 @@ describe("email-otp send origin/CSRF protection", async () => {
 		expect(sendVerificationOTP).toHaveBeenCalledTimes(1);
 	});
 });
+
+it("refreshes the session after changing the email with an OTP", () => {
+	const listener = emailOTPClient().atomListeners.find(
+		({ signal }) => signal === "$sessionSignal",
+	);
+	expect(listener?.matcher("/email-otp/change-email")).toBe(true);
+});

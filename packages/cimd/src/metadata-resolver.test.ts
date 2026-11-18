@@ -594,9 +594,133 @@ describe("CIMD metadata resolver", () => {
 			expect(await joined).toMatchObject({ fromCache: false });
 
 			failLeader(new Error("transport failed"));
-			expect(await leaderOutcome).toBe("rejected");
+			// The retired fetch's failure is not reported: the owner looks again
+			// and fetches for itself, which the failure's pacing would have refused.
+			expect(await leaderOutcome).toBe("resolved");
 			expect(await resolve(ctx, clientId)).toMatchObject({ fromCache: false });
-			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(3);
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(4);
+		});
+
+		it("does not report the failure of a retired fetch to the requests that waited for it", async () => {
+			const clientId = "https://retired-failure.example/metadata.json";
+			let failLeader!: (error: Error) => void;
+			const fetchClientMetadataResource = vi.fn(async () =>
+				documentResponse(
+					sampleMetadata(clientId, { client_name: "Replacement" }),
+				),
+			);
+			fetchClientMetadataResource.mockImplementationOnce(
+				() =>
+					new Promise<Response>((_resolve, reject) => {
+						failLeader = reject;
+					}),
+			);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 0 },
+			});
+			const { ctx } = await createRequestContext();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+			const leader = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(0);
+			const joined = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(await joined).toMatchObject({
+				metadata: { client_name: "Replacement" },
+			});
+
+			failLeader(new Error("transport failed"));
+			expect(await leader).toMatchObject({
+				fromCache: false,
+				metadata: { client_name: "Replacement" },
+			});
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
+		});
+
+		it("does not report the failure of a lease-retired fetch to a request that joined it", async () => {
+			const stuckClientId = "https://retired-joiner.example/metadata.json";
+			const otherClientId =
+				"https://retired-joiner-other.example/metadata.json";
+			let failStuck!: (error: Error) => void;
+			const fetchClientMetadataResource = vi.fn(
+				async (input: RequestInfo | URL) =>
+					documentResponse(sampleMetadata(String(input))),
+			);
+			fetchClientMetadataResource.mockImplementationOnce(
+				() =>
+					new Promise<Response>((_resolve, reject) => {
+						failStuck = reject;
+					}),
+			);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 0 },
+			});
+			const { ctx } = await createRequestContext();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
+			void resolve(ctx, stuckClientId).catch(() => {});
+			await vi.advanceTimersByTimeAsync(5_000);
+			const joined = resolve(ctx, stuckClientId);
+			await vi.advanceTimersByTimeAsync(5_000);
+			// A request for another client takes the lease back at 10 seconds,
+			// while the joiner still waits.
+			await resolve(ctx, otherClientId);
+
+			failStuck(new Error("transport failed"));
+			expect(await joined).toMatchObject({
+				fromCache: false,
+				metadata: { client_id: stuckClientId },
+			});
+		});
+
+		it("accepts the document of a lease-retired fetch when nothing replaced it", async () => {
+			const clientId = "https://retired-accepted.example/metadata.json";
+			const otherClientId =
+				"https://retired-accepted-other.example/metadata.json";
+			const lateResponse = deferred<Response>();
+			const fetchClientMetadataResource = vi.fn(
+				async (input: RequestInfo | URL) =>
+					documentResponse(sampleMetadata(String(input))),
+			);
+			fetchClientMetadataResource.mockImplementationOnce(
+				() => lateResponse.promise,
+			);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: {
+					minimumFetchInterval: 0,
+					maximumConcurrentFetches: 1,
+					maximumFetchesPerMinute: 2,
+				},
+			});
+			const { ctx } = await createRequestContext();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
+			const owner = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(10_000);
+			// Another client's request takes the lease back.
+			await resolve(ctx, otherClientId);
+
+			// A transport that ignores the abort signal can still answer late. Its
+			// body is read without the signal, so the document is valid.
+			const late = documentResponse(
+				sampleMetadata(clientId, { client_name: "Late" }),
+			);
+			Object.defineProperty(late, "body", { value: null });
+			lateResponse.resolve(late);
+			expect(await owner).toMatchObject({
+				fromCache: false,
+				metadata: { client_name: "Late" },
+			});
+
+			// The late document is cached, and no further fetch was spent on it.
+			expect(await resolve(ctx, clientId)).toMatchObject({
+				fromCache: true,
+				metadata: { client_name: "Late" },
+			});
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
 		});
 
 		it("gives a fetch that never settles its concurrency slot back after the lease", async () => {

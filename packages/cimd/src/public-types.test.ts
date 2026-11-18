@@ -7,6 +7,8 @@ import type {
 	CimdMetadataValidationOptions,
 	CimdMetadataValidationResult,
 	CimdOptions,
+	CimdOwnedResolverOptions,
+	CimdSharedResolverOptions,
 } from "@better-auth/cimd";
 import type { GenericEndpointContext } from "@better-auth/core";
 import type {
@@ -95,6 +97,15 @@ describe("public CIMD surface", () => {
 		expectTypeOf<CimdOptions["metadataResolver"]>().toEqualTypeOf<
 			CimdMetadataResolver | undefined
 		>();
+		expectTypeOf<CimdOptions>().toEqualTypeOf<
+			CimdOwnedResolverOptions | CimdSharedResolverOptions
+		>();
+		expectTypeOf<
+			CimdSharedResolverOptions["metadataResolver"]
+		>().toEqualTypeOf<CimdMetadataResolver>();
+		expectTypeOf<
+			CimdOwnedResolverOptions["metadataResolver"]
+		>().toEqualTypeOf<undefined>();
 		expectTypeOf<CimdMetadataResolverOptions>().toHaveProperty(
 			"fetchClientMetadataResource",
 		);

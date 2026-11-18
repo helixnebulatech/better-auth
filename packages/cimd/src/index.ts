@@ -77,6 +77,8 @@ export type {
 	CimdMetadataResolver,
 	CimdMetadataResolverOptions,
 	CimdOptions,
+	CimdOwnedResolverOptions,
+	CimdSharedResolverOptions,
 } from "./types";
 export type {
 	CimdMetadataValidationOptions,

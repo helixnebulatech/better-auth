@@ -217,8 +217,12 @@ interface CimdClientEventOptions {
 	onClientRefreshed?: (event: CimdClientRefreshedEvent) => void | Promise<void>;
 }
 
-/** Options for a plugin instance that owns its metadata resolver. */
-interface CimdOwnedResolverOptions
+/**
+ * Options for a plugin instance that owns its metadata resolver. This is the
+ * half of {@link CimdOptions} that sets the transport and the fetch and
+ * validation options directly.
+ */
+export interface CimdOwnedResolverOptions
 	extends CimdMetadataResolverOptions,
 		CimdClientEventOptions {
 	/**
@@ -234,8 +238,12 @@ type ResolverOwnedOptions = {
 	[Option in keyof CimdMetadataResolverOptions]?: never;
 };
 
-/** Options for a plugin instance that uses a shared metadata resolver. */
-interface CimdSharedResolverOptions
+/**
+ * Options for a plugin instance that uses a shared metadata resolver. This is
+ * the half of {@link CimdOptions} that takes the transport and every fetch and
+ * validation option from the resolver.
+ */
+export interface CimdSharedResolverOptions
 	extends CimdClientEventOptions,
 		ResolverOwnedOptions {
 	/**

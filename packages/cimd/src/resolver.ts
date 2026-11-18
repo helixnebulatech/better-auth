@@ -65,10 +65,13 @@ interface InFlightMetadataFetch {
 	/** Retires the fetch and returns its permit. Calling it again does nothing. */
 	retire: () => void;
 	/**
-	 * Whether the fetch was retired. Its document may be older than the
-	 * document of the fetch that replaced it, so nobody returns it.
+	 * Whether the fetch was retired and its outcome is not used. A retired
+	 * fetch's document may be older than the document of the fetch that
+	 * replaced it, so nobody returns it, and its failure is not reported.
+	 * A fetch retired by the lease with no replacement is used when it
+	 * answers late.
 	 */
-	isRetired: () => boolean;
+	isDiscarded: () => boolean;
 }
 
 /**
@@ -577,6 +580,9 @@ function createMetadataResolver(
 		let fetched: FetchedMetadata | undefined;
 		try {
 			fetched = await Promise.race([inFlight.fetched, gaveUp]);
+		} catch (error) {
+			if (inFlight.isDiscarded()) return undefined;
+			throw error;
 		} finally {
 			clearTimeout(timer);
 		}
@@ -584,7 +590,7 @@ function createMetadataResolver(
 			retireFetch(clientId, inFlight);
 			return undefined;
 		}
-		return inFlight.isRetired() ? undefined : fetched;
+		return inFlight.isDiscarded() ? undefined : fetched;
 	};
 
 	const readFreshEntry = (clientId: string) => {
@@ -592,7 +598,8 @@ function createMetadataResolver(
 		return entry && entry.expiresAt > Date.now() ? entry : undefined;
 	};
 
-	// Resolves to `undefined` when the fetch was retired before it settled.
+	// Resolves to `undefined` when the fetch was retired before it settled and
+	// its outcome, a document or a failure, is not used.
 	const startFetch = async (
 		ctx: GenericEndpointContext,
 		clientId: string,
@@ -601,6 +608,7 @@ function createMetadataResolver(
 	): Promise<FetchedMetadata | undefined> => {
 		const releaseMetadataFetchPermit = acquireMetadataFetchPermit(clientId);
 		let retired = false;
+		let acceptedLate = false;
 		const fetchPromise = (async (): Promise<FetchedMetadata> => {
 			const fetched = await fetchClientMetadataDocument(
 				ctx,
@@ -638,8 +646,17 @@ function createMetadataResolver(
 				metadataRevalidationInterval,
 				Date.now(),
 			);
-			// A retired fetch leaves the cache and pacing to the fetch that replaced it.
-			if (!retired) {
+			// A retired fetch leaves the cache and pacing to the fetch that replaced
+			// it. When nothing replaced it, its document is the newest there is, so
+			// it is accepted instead of spending another fetch on the same document.
+			if (
+				retired &&
+				!inFlightFetchByClientId.has(clientId) &&
+				metadataCache.get(clientId) === cachedEntry
+			) {
+				acceptedLate = true;
+			}
+			if (!retired || acceptedLate) {
 				if (nextEntry) {
 					storeCacheEntry(clientId, nextEntry);
 				} else {
@@ -658,13 +675,14 @@ function createMetadataResolver(
 				retired = true;
 				releaseMetadataFetchPermit();
 			},
-			isRetired: () => retired,
+			isDiscarded: () => retired && !acceptedLate,
 		};
 		inFlightFetchByClientId.set(clientId, inFlight);
 		try {
 			const fetched = await fetchPromise;
-			return retired ? undefined : fetched;
+			return inFlight.isDiscarded() ? undefined : fetched;
 		} catch (error) {
+			if (inFlight.isDiscarded()) return undefined;
 			if (!retired) {
 				lastFetchStartAtMsByClientId.delete(clientId);
 				lastFetchStartAtMsByClientId.set(clientId, Date.now());

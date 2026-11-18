@@ -2207,39 +2207,6 @@ describe("oauth-provider device approval through the consent flow", async () => 
 		expect(stored?.scopes).toEqual([]);
 	});
 
-	it("keeps the scopes of an earlier device when another device of the client is approved for fewer", async () => {
-		resolveReference = () => "org_1";
-		const first = await startDevice();
-		await answerDeviceConsent(client, first.user_code, first.headers);
-		const second = await auth.api.deviceCode({
-			body: { client_id: first.clientId, scope: "openid", resource },
-		});
-		await answerDeviceConsent(client, second.user_code, first.headers);
-
-		const stored = await db.findMany<{ scopes: string[] }>({
-			model: "oauthConsent",
-			where: [
-				{ field: "clientId", value: first.clientId },
-				{ field: "userId", value: first.user.id },
-			],
-		});
-		expect(stored.map(({ scopes }) => scopes)).toEqual([
-			["openid", "offline_access"],
-		]);
-		const firstTokens = await first.poll({
-			grant_type: DEVICE_CODE_GRANT_TYPE,
-			device_code: first.device_code,
-		});
-		expect(firstTokens.error).toBeNull();
-		expect(firstTokens.data?.refresh_token).toBeDefined();
-		const secondTokens = await first.poll({
-			grant_type: DEVICE_CODE_GRANT_TYPE,
-			device_code: second.device_code,
-		});
-		expect(secondTokens.error).toBeNull();
-		expect(secondTokens.data?.scope).toBe("openid");
-	});
-
 	/**
 	 * @see https://datatracker.ietf.org/doc/html/rfc8628#section-5.4
 	 */
@@ -2431,20 +2398,20 @@ describe("oauth-provider device approval through the consent flow", async () => 
 		}
 
 		/**
-		 * Approves another device code of the same client for the same user, with
-		 * the given scopes or all requested ones, and returns that code.
+		 * Requests another device code of the same client for the same user,
+		 * approves it with `accepted` or every requested scope, and returns it.
 		 */
-		async function approveAgain(device: Device, scope?: string) {
+		async function approveAgain(
+			device: Device,
+			requested = "openid offline_access",
+			accepted?: string,
+		) {
 			const { device_code, user_code } = await auth.api.deviceCode({
-				body: {
-					client_id: device.clientId,
-					scope: "openid offline_access",
-					resource,
-				},
+				body: { client_id: device.clientId, scope: requested, resource },
 			});
 			await answerDeviceConsent(client, user_code, device.headers, {
 				accept: true,
-				scope,
+				scope: accepted,
 			});
 			return device_code;
 		}
@@ -2517,11 +2484,28 @@ describe("oauth-provider device approval through the consent flow", async () => 
 			});
 		});
 
-		it("rejects a device code after another device of the client is approved with fewer scopes", async () => {
+		it("redeems both device codes after another device of the client is approved for fewer scopes", async () => {
 			resolveReference = () => "org_1";
 			const device = await approveDevice();
 			const narrower = await approveAgain(device, "openid");
-			// The later approval replaces the consent rather than adding to it.
+			// The later approval adds to the consent instead of replacing it.
+			expect((await findStoredConsent(device, "org_1"))?.scopes).toEqual([
+				"openid",
+				"offline_access",
+			]);
+
+			const tokens = await redeem(device);
+			expect(tokens.error).toBeNull();
+			expect(tokens.data?.refresh_token).toBeDefined();
+			const narrowerTokens = await redeem(device, narrower);
+			expect(narrowerTokens.error).toBeNull();
+			expect(narrowerTokens.data?.scope).toBe("openid");
+		});
+
+		it("rejects a device code after the user declines one of its scopes for another device", async () => {
+			resolveReference = () => "org_1";
+			const device = await approveDevice();
+			await approveAgain(device, "openid offline_access", "openid");
 			expect((await findStoredConsent(device, "org_1"))?.scopes).toEqual([
 				"openid",
 			]);
@@ -2533,9 +2517,6 @@ describe("oauth-provider device approval through the consent flow", async () => 
 				error: "invalid_grant",
 				error_description: "consent no longer covers this authorization",
 			});
-			const tokens = await redeem(device, narrower);
-			expect(tokens.error).toBeNull();
-			expect(tokens.data?.scope).toBe("openid");
 		});
 
 		it("redeems a device code after its consent was deleted and given again for the same request", async () => {

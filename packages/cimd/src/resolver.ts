@@ -27,7 +27,8 @@ import { isCimdClientIdUrlCandidate } from "./validate-metadata-document";
 
 const FETCH_BUDGET_WINDOW_MS = 60_000;
 // A request that joins a fetch stops waiting for it after twice the fetch
-// timeout, which the request that started the fetch enforces itself.
+// timeout, which the request that started the fetch enforces itself. A fetch
+// permit is leased for the same time.
 const JOINED_FETCH_WAIT_MS = FETCH_TIMEOUT_MS * 2;
 const DEFAULT_METADATA_FETCH_POLICY = {
 	minimumFetchInterval: 1,
@@ -59,8 +60,15 @@ interface FetchedMetadata {
 
 interface InFlightMetadataFetch {
 	fetched: Promise<FetchedMetadata>;
+	/** When the fetch took its permit, which is leased for `JOINED_FETCH_WAIT_MS`. */
+	startedAtMs: number;
 	/** Retires the fetch and returns its permit. Calling it again does nothing. */
-	abandon: () => void;
+	retire: () => void;
+	/**
+	 * Whether the fetch was retired. Its document may be older than the
+	 * document of the fetch that replaced it, so nobody returns it.
+	 */
+	isRetired: () => boolean;
 }
 
 interface ResolvedMetadataFetchPolicy {
@@ -338,9 +346,9 @@ function getOAuthProviderOptions(
  *
  * Concurrent requests for one client share a single fetch. The document each
  * request receives is its own copy, and the caller saves it with that
- * request's context. A request that joins a fetch stops waiting for it after
- * twice the fetch timeout and fetches for itself, so a request that the runtime
- * ended cannot stall the others.
+ * request's context. A request waits at most 10 seconds for each fetch it
+ * joins and then fetches for itself, so a request that the runtime ended
+ * cannot stall the others.
  */
 export function createCimdMetadataResolver(
 	options: CimdMetadataResolverOptions,
@@ -448,8 +456,27 @@ export function createCimdMetadataResolver(
 		return createdState;
 	};
 
+	// A fetch whose request the runtime ended may never settle, and then never
+	// returns its permit. A retired fetch leaves the in-flight map, its pacing
+	// record and permit are returned, and it can no longer publish or record a
+	// failure, so later requests fetch again.
+	const retireFetch = (clientId: string, inFlight: InFlightMetadataFetch) => {
+		if (inFlightFetchByClientId.get(clientId) === inFlight) {
+			inFlightFetchByClientId.delete(clientId);
+			lastFetchStartAtMsByClientId.delete(clientId);
+		}
+		inFlight.retire();
+	};
+
 	const acquireMetadataFetchPermit = (clientId: string): (() => void) => {
 		const nowMs = Date.now();
+		// Permits are leased, so a request for any client can take back the slots
+		// that fetches which never settled still hold.
+		for (const [inFlightClientId, inFlight] of inFlightFetchByClientId) {
+			if (nowMs - inFlight.startedAtMs >= JOINED_FETCH_WAIT_MS) {
+				retireFetch(inFlightClientId, inFlight);
+			}
+		}
 		const lastFetchStartAtMs = lastFetchStartAtMsByClientId.get(clientId);
 		if (
 			fetchPolicy.minimumFetchIntervalMs > 0 &&
@@ -525,11 +552,7 @@ export function createCimdMetadataResolver(
 		},
 	});
 
-	// A fetch started by a request that the runtime then ends never settles, and
-	// its permit is never released. A request that joined it stops waiting and
-	// retires the fetch: it leaves the in-flight map, its pacing record and permit
-	// are returned, and it can no longer publish or record a failure, so later
-	// requests fetch again.
+	// A request that joined a fetch that does not settle in time retires it.
 	const joinFetch = async (
 		clientId: string,
 		inFlight: InFlightMetadataFetch,
@@ -546,13 +569,10 @@ export function createCimdMetadataResolver(
 			clearTimeout(timer);
 		}
 		if (fetched === undefined) {
-			if (inFlightFetchByClientId.get(clientId) === inFlight) {
-				inFlightFetchByClientId.delete(clientId);
-				lastFetchStartAtMsByClientId.delete(clientId);
-			}
-			inFlight.abandon();
+			retireFetch(clientId, inFlight);
+			return undefined;
 		}
-		return fetched;
+		return inFlight.isRetired() ? undefined : fetched;
 	};
 
 	const readFreshEntry = (clientId: string) => {
@@ -560,47 +580,15 @@ export function createCimdMetadataResolver(
 		return entry && entry.expiresAt > Date.now() ? entry : undefined;
 	};
 
-	return async (ctx, clientId) => {
-		if (!isCimdClientIdUrlCandidate(clientId)) {
-			return null;
-		}
-
-		const oauthOptions = getOAuthProviderOptions(ctx);
-		const initialEntry = readFreshEntry(clientId);
-		if (initialEntry) {
-			return toResolution(
-				clientId,
-				{ metadata: initialEntry.metadata, entry: initialEntry },
-				true,
-			);
-		}
-
-		// Every caller that would fetch or join a fetch evaluates the URL policy
-		// itself, before any permit is taken: refused URLs never spend the fetch
-		// budget, and a context-dependent policy is never skipped by coalescing.
-		await assertClientIdUrlFetchable(ctx, clientId, options);
-
-		// Another caller may have cached or started a fetch while the policy ran.
-		// A document that landed in that window is newer than anything the caller
-		// read before it, so it is reported as fetched, not as a cache hit.
-		const cachedEntry = readCacheEntry(clientId);
-		if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
-			return toResolution(
-				clientId,
-				{ metadata: cachedEntry.metadata, entry: cachedEntry },
-				false,
-			);
-		}
-
-		let sharedFetch = inFlightFetchByClientId.get(clientId);
-		while (sharedFetch) {
-			const fetched = await joinFetch(clientId, sharedFetch);
-			if (fetched) return toResolution(clientId, fetched, false);
-			sharedFetch = inFlightFetchByClientId.get(clientId);
-		}
-
+	// Resolves to `undefined` when the fetch was retired before it settled.
+	const startFetch = async (
+		ctx: GenericEndpointContext,
+		clientId: string,
+		cachedEntry: CimdMetadataCacheEntry | undefined,
+		oauthOptions: OAuthOptions<Scope[]>,
+	): Promise<FetchedMetadata | undefined> => {
 		const releaseMetadataFetchPermit = acquireMetadataFetchPermit(clientId);
-		let abandoned = false;
+		let retired = false;
 		const fetchPromise = (async (): Promise<FetchedMetadata> => {
 			const fetched = await fetchClientMetadataDocument(
 				ctx,
@@ -639,7 +627,7 @@ export function createCimdMetadataResolver(
 				Date.now(),
 			);
 			// A retired fetch leaves the cache and pacing to the fetch that replaced it.
-			if (!abandoned) {
+			if (!retired) {
 				if (nextEntry) {
 					storeCacheEntry(clientId, nextEntry);
 				} else {
@@ -651,18 +639,21 @@ export function createCimdMetadataResolver(
 			}
 			return { metadata, entry: nextEntry };
 		})();
-		const inFlight = {
+		const inFlight: InFlightMetadataFetch = {
 			fetched: fetchPromise,
-			abandon() {
-				abandoned = true;
+			startedAtMs: Date.now(),
+			retire() {
+				retired = true;
 				releaseMetadataFetchPermit();
 			},
+			isRetired: () => retired,
 		};
 		inFlightFetchByClientId.set(clientId, inFlight);
 		try {
-			return toResolution(clientId, await fetchPromise, false);
+			const fetched = await fetchPromise;
+			return retired ? undefined : fetched;
 		} catch (error) {
-			if (!abandoned) {
+			if (!retired) {
 				lastFetchStartAtMsByClientId.delete(clientId);
 				lastFetchStartAtMsByClientId.set(clientId, Date.now());
 			}
@@ -672,6 +663,50 @@ export function createCimdMetadataResolver(
 				inFlightFetchByClientId.delete(clientId);
 			}
 			releaseMetadataFetchPermit();
+		}
+	};
+
+	return async (ctx, clientId) => {
+		if (!isCimdClientIdUrlCandidate(clientId)) {
+			return null;
+		}
+
+		const oauthOptions = getOAuthProviderOptions(ctx);
+		const initialEntry = readFreshEntry(clientId);
+		if (initialEntry) {
+			return toResolution(
+				clientId,
+				{ metadata: initialEntry.metadata, entry: initialEntry },
+				true,
+			);
+		}
+
+		// Every caller that would fetch or join a fetch evaluates the URL policy
+		// itself, before any permit is taken: refused URLs never spend the fetch
+		// budget, and a context-dependent policy is never skipped by coalescing.
+		await assertClientIdUrlFetchable(ctx, clientId, options);
+
+		// A fetch that was retired before it settled is not used: the fetch that
+		// replaced it may hold a newer document, so the caller looks again.
+		while (true) {
+			// Another caller may have cached or started a fetch while the policy ran
+			// or the caller waited. A document that landed in that window is newer
+			// than anything the caller read before it, so it is reported as fetched,
+			// not as a cache hit.
+			const cachedEntry = readCacheEntry(clientId);
+			if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
+				return toResolution(
+					clientId,
+					{ metadata: cachedEntry.metadata, entry: cachedEntry },
+					false,
+				);
+			}
+
+			const sharedFetch = inFlightFetchByClientId.get(clientId);
+			const fetched = sharedFetch
+				? await joinFetch(clientId, sharedFetch)
+				: await startFetch(ctx, clientId, cachedEntry, oauthOptions);
+			if (fetched) return toResolution(clientId, fetched, false);
 		}
 	};
 }

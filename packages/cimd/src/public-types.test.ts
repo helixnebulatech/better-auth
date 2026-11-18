@@ -10,6 +10,7 @@ import type {
 } from "@better-auth/cimd";
 import type { GenericEndpointContext } from "@better-auth/core";
 import type {
+	ClientMetadataResourceFetch,
 	OAuthClientMetadata,
 	SchemaClient,
 	Scope,
@@ -27,6 +28,30 @@ function assertValidationResultNarrowing(
 		expectTypeOf(validation.error).toEqualTypeOf<string>();
 		expectTypeOf(validation.metadata).toEqualTypeOf<undefined>();
 	}
+}
+
+/**
+ * The transport and the fetch and validation options are configured once:
+ * on the plugin, or on the shared resolver that the plugin then uses.
+ */
+function assertSharedResolverConfiguration(
+	fetchClientMetadataResource: ClientMetadataResourceFetch,
+) {
+	cimdExports.cimd({ fetchClientMetadataResource });
+	const metadataResolver = cimdExports.createCimdMetadataResolver({
+		fetchClientMetadataResource,
+		isMetadataDocumentUrlAllowed: () => true,
+	});
+	cimdExports.cimd({ metadataResolver, onClientCreated: () => {} });
+	// @ts-expect-error the shared resolver carries the transport
+	cimdExports.cimd({ metadataResolver, fetchClientMetadataResource });
+	// @ts-expect-error the shared resolver owns the URL policy
+	cimdExports.cimd({
+		metadataResolver,
+		isMetadataDocumentUrlAllowed: () => true,
+	});
+	// @ts-expect-error a plugin needs a transport or a shared resolver
+	cimdExports.cimd({});
 }
 
 describe("public CIMD surface", () => {
@@ -54,16 +79,18 @@ describe("public CIMD surface", () => {
 		expectTypeOf(
 			cimdExports.createCimdMetadataResolver,
 		).returns.toEqualTypeOf<CimdMetadataResolver>();
-		expectTypeOf<CimdMetadataResolver>().toEqualTypeOf<
-			(
-				context: GenericEndpointContext,
-				clientId: string,
-			) => Promise<CimdMetadataResolution | null>
+		expectTypeOf<CimdMetadataResolver>().parameters.toEqualTypeOf<
+			[GenericEndpointContext, string]
 		>();
+		expectTypeOf<CimdMetadataResolver>().returns.toEqualTypeOf<
+			Promise<CimdMetadataResolution | null>
+		>();
+		expectTypeOf<
+			CimdMetadataResolver["fetchClientMetadataResource"]
+		>().toEqualTypeOf<ClientMetadataResourceFetch>();
 		expectTypeOf<CimdMetadataResolution>().toEqualTypeOf<{
 			metadata: OAuthClientMetadata;
 			fromCache: boolean;
-			discard(): void;
 		}>();
 		expectTypeOf<CimdOptions["metadataResolver"]>().toEqualTypeOf<
 			CimdMetadataResolver | undefined
@@ -77,6 +104,7 @@ describe("public CIMD surface", () => {
 		expectTypeOf<CimdMetadataResolverOptions>().not.toHaveProperty(
 			"metadataResolver",
 		);
+		void assertSharedResolverConfiguration;
 	});
 
 	it("keeps the released policy callback signature", () => {

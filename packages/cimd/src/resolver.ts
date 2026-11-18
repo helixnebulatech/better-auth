@@ -71,6 +71,23 @@ interface InFlightMetadataFetch {
 	isRetired: () => boolean;
 }
 
+/**
+ * A resolution from a resolver that a discovery owns. It can drop its document
+ * when the discovery cannot save the client.
+ */
+interface OwnedMetadataResolution extends CimdMetadataResolution {
+	/**
+	 * Drop the cached document, so the next request fetches it again after the
+	 * per-client minimum interval.
+	 */
+	discard(): void;
+}
+
+type OwnedMetadataResolver = (
+	ctx: GenericEndpointContext,
+	clientId: string,
+) => Promise<OwnedMetadataResolution | null>;
+
 interface ResolvedMetadataFetchPolicy {
 	minimumFetchIntervalMs: number;
 	maximumConcurrentFetches: number;
@@ -335,24 +352,19 @@ function getOAuthProviderOptions(
 }
 
 /**
- * Build a resolver that fetches, validates, and caches Client ID Metadata
- * Documents, and saves nothing.
- *
- * The cache, fetch budgets, and in-flight fetches live in this closure. Pass
- * the result to `cimd({ metadataResolver })` to share them between discoveries
- * that are created per request, as a runtime whose database handle belongs to
- * one request needs. Without it, each plugin instance owns its own resolver, so
- * separate `cimd()` instances never share trust state or conditional validators.
+ * Build the metadata resolver behind {@link createCimdMetadataResolver}. Its
+ * resolutions can also drop their document, which only a discovery that owns
+ * the resolver does.
  *
  * Concurrent requests for one client share a single fetch. The document each
  * request receives is its own copy, and the caller saves it with that
- * request's context. A request waits at most 10 seconds for each fetch it
- * joins and then fetches for itself, so a request that the runtime ended
- * cannot stall the others.
+ * request's context. A request waits at most `JOINED_FETCH_WAIT_MS` for each
+ * fetch it joins and then fetches for itself, so a request that the runtime
+ * ended cannot stall the others.
  */
-export function createCimdMetadataResolver(
+function createMetadataResolver(
 	options: CimdMetadataResolverOptions,
-): CimdMetadataResolver {
+): OwnedMetadataResolver {
 	const metadataRevalidationInterval =
 		options.metadataRevalidationInterval ?? "60m";
 	const maxCacheEntries = options.maxCacheEntries ?? 1_000;
@@ -540,7 +552,7 @@ export function createCimdMetadataResolver(
 		clientId: string,
 		{ metadata, entry }: FetchedMetadata,
 		fromCache: boolean,
-	): CimdMetadataResolution => ({
+	): OwnedMetadataResolution => ({
 		metadata: structuredClone(metadata),
 		fromCache,
 		discard() {
@@ -711,7 +723,48 @@ export function createCimdMetadataResolver(
 	};
 }
 
+/**
+ * Build a resolver that fetches, validates, and caches Client ID Metadata
+ * Documents, and saves nothing.
+ *
+ * The cache, fetch budgets, and in-flight fetches live in this closure. Pass
+ * the result to `cimd({ metadataResolver })` to share them between discoveries
+ * that are created per request, as a runtime whose database handle belongs to
+ * one request needs. Without it, each plugin instance owns its own resolver, so
+ * separate `cimd()` instances never share trust state or conditional validators.
+ *
+ * Concurrent requests for one client share a single fetch. The document each
+ * request receives is its own copy, and the caller saves it with that
+ * request's context. A request waits at most 10 seconds for each fetch it
+ * joins and then fetches for itself, so a request that the runtime ended
+ * cannot stall the others.
+ *
+ * The resolver carries `fetchClientMetadataResource`, and a discovery that uses
+ * it fetches discovery-owned resources such as `jwks_uri` with that transport.
+ */
+export function createCimdMetadataResolver(
+	options: CimdMetadataResolverOptions,
+): CimdMetadataResolver {
+	const resolveMetadata = createMetadataResolver(options);
+	return Object.assign(
+		async (
+			context: GenericEndpointContext,
+			clientId: string,
+		): Promise<CimdMetadataResolution | null> => {
+			const resolution = await resolveMetadata(context, clientId);
+			return (
+				resolution && {
+					metadata: resolution.metadata,
+					fromCache: resolution.fromCache,
+				}
+			);
+		},
+		{ fetchClientMetadataResource: options.fetchClientMetadataResource },
+	);
+}
+
 const METADATA_RESOLVER_OPTION_NAMES = [
+	"fetchClientMetadataResource",
 	"isMetadataDocumentUrlAllowed",
 	"maxCacheEntries",
 	"metadataFetchPolicy",
@@ -729,57 +782,78 @@ const METADATA_RESOLVER_OPTION_NAMES = [
  */
 export function createCimdResolver(cimdOptions: CimdOptions): CimdResolver {
 	const sharedResolver = cimdOptions.metadataResolver;
-	if (sharedResolver) {
-		const misplaced = METADATA_RESOLVER_OPTION_NAMES.filter(
-			(name) => cimdOptions[name] !== undefined,
-		);
-		if (misplaced.length > 0) {
-			throw new BetterAuthError(
-				`cimd ${misplaced.join(", ")} cannot be set together with metadataResolver. Pass them to createCimdMetadataResolver instead.`,
-			);
-		}
+	if (!sharedResolver) {
+		const resolveMetadata = createMetadataResolver(cimdOptions);
+		return async (ctx, clientId, existingClient) => {
+			const resolution = await resolveMetadata(ctx, clientId);
+			if (!resolution) return null;
+
+			// An owned resolver only caches what its own discovery fetched, so a
+			// cache hit vouches for the stored row. No request waits for another
+			// request's save, so a hit that arrives while a refresh is still saving
+			// gets the row as it was.
+			if (resolution.fromCache && existingClient) return existingClient;
+
+			try {
+				return await persistMetadataDocumentClient(
+					ctx,
+					clientId,
+					resolution.metadata,
+					cimdOptions,
+					getOAuthProviderOptions(ctx),
+					existingClient ?? undefined,
+				);
+			} catch (error) {
+				if (!resolution.fromCache) resolution.discard();
+				throw error;
+			}
+		};
 	}
-	const resolveMetadata =
-		sharedResolver ?? createCimdMetadataResolver(cimdOptions);
+
+	const misplaced = METADATA_RESOLVER_OPTION_NAMES.filter(
+		(name) => cimdOptions[name] !== undefined,
+	);
+	if (misplaced.length > 0) {
+		throw new BetterAuthError(
+			`cimd ${misplaced.join(", ")} cannot be set together with metadataResolver. Pass them to createCimdMetadataResolver instead.`,
+		);
+	}
+	// Discovery-owned resources such as `jwks_uri` are fetched with the
+	// resolver's transport, so a resolver without one must not get this far.
+	if (typeof sharedResolver.fetchClientMetadataResource !== "function") {
+		throw new BetterAuthError(
+			"cimd metadataResolver has no fetchClientMetadataResource. Create it with createCimdMetadataResolver.",
+		);
+	}
 
 	return async (ctx, clientId, existingClient) => {
-		const resolution = await resolveMetadata(ctx, clientId);
+		const resolution = await sharedResolver(ctx, clientId);
 		if (!resolution) return null;
 
 		const oauthOptions = getOAuthProviderOptions(ctx);
 		// A resolver shared with other discoveries can hold a document that was
 		// saved through another database, so a cache hit cannot vouch for this
-		// database's row. An owned resolver only caches what its own discovery
-		// fetched, so a hit does. No request waits for another request's save, so
-		// a hit that arrives while a refresh is still saving gets the row as it was.
+		// database's row. A failed save keeps the document cached: the next
+		// request that finds its stored client out of date saves it again.
 		if (
 			resolution.fromCache &&
 			existingClient &&
-			(!sharedResolver ||
-				isClientCurrentWithMetadata(
-					existingClient,
-					resolution.metadata,
-					oauthOptions,
-				))
+			isClientCurrentWithMetadata(
+				existingClient,
+				resolution.metadata,
+				oauthOptions,
+			)
 		) {
 			return existingClient;
 		}
 
-		try {
-			return await persistMetadataDocumentClient(
-				ctx,
-				clientId,
-				resolution.metadata,
-				cimdOptions,
-				oauthOptions,
-				existingClient ?? undefined,
-			);
-		} catch (error) {
-			// A shared resolver's cache hits compare each request's stored row with
-			// the document, so a failed save here is retried without a refetch and
-			// must not evict the document for the other requests.
-			if (!resolution.fromCache && !sharedResolver) resolution.discard();
-			throw error;
-		}
+		return persistMetadataDocumentClient(
+			ctx,
+			clientId,
+			resolution.metadata,
+			cimdOptions,
+			oauthOptions,
+			existingClient ?? undefined,
+		);
 	};
 }

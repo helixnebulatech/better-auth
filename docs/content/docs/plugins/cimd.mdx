@@ -119,7 +119,7 @@ export const cimdOptionsType = {
 	fetchClientMetadataResource: {
 		type: "(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>",
 		description:
-			"Required runtime-owned transport for metadata documents and discovery-owned resources. It must resolve once, reject RFC 6890 special-use addresses, pin the approved address, and refuse redirects.",
+			"Runtime-owned transport for metadata documents and discovery-owned resources. It must resolve once, reject RFC 6890 special-use addresses, pin the approved address, and refuse redirects. Required unless you pass `metadataResolver`, which carries its own.",
 	},
 	metadataProfile: {
 		type: '"mcp-2026-07-28"',
@@ -136,7 +136,7 @@ export const cimdOptionsType = {
 		type: "number",
 		default: "1000",
 		description:
-			"Maximum validated metadata documents retained by the metadata resolver, which is this plugin instance's own unless you pass `metadataResolver`.",
+			"Maximum validated metadata documents retained by the metadata resolver.",
 	},
 	metadataFetchPolicy: {
 		type: "{ minimumFetchInterval?: number | string; maximumConcurrentFetches?: number; maximumConcurrentFetchesPerOrigin?: number; maximumFetchesPerMinute?: number; maximumFetchesPerOriginPerMinute?: number }",
@@ -161,7 +161,7 @@ export const cimdOptionsType = {
 		type: "CimdMetadataResolver",
 		default: "a resolver owned by this plugin instance",
 		description:
-			"A metadata resolver from `createCimdMetadataResolver`, shared by several discoveries. It owns the fetch and validation options, so setting `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`, `metadataFetchPolicy`, `maxCacheEntries`, or `isMetadataDocumentUrlAllowed` next to it throws. See Share one metadata cache across requests.",
+			"A metadata resolver from `createCimdMetadataResolver`, shared by several plugin instances. It carries the transport and the fetch and validation options, so `fetchClientMetadataResource`, `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`, `metadataFetchPolicy`, `maxCacheEntries`, and `isMetadataDocumentUrlAllowed` are set on it. Setting one of them next to `metadataResolver` is a type error and throws when the plugin is created. See Share one metadata cache across requests.",
 	},
 	onClientCreated: {
 		type: "(event: CimdClientCreatedEvent) => void | Promise<void>",
@@ -257,7 +257,7 @@ export function createAuth(env: Env) {
       oauthProvider({
         // ...
       }),
-      cimd({ fetchClientMetadataResource, metadataResolver }),
+      cimd({ metadataResolver }),
     ],
   });
 }
@@ -269,7 +269,7 @@ A request waits at most ten seconds for a fetch that another request started. Wh
 
 With a shared `metadataResolver`, a client that cannot be saved keeps its cached document, and the next request that finds its stored client out of date saves it again. Without one, a client that cannot be saved after its document was fetched drops that document, so the next request fetches it again after `minimumFetchInterval`.
 
-The resolver owns every option that decides how a document is fetched and validated: `fetchClientMetadataResource`, `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`, `metadataFetchPolicy`, `maxCacheEntries`, and `isMetadataDocumentUrlAllowed`. Setting any of them except `fetchClientMetadataResource` next to `metadataResolver` throws when the plugin is created, so a setting is never ignored without notice. The plugin still needs `fetchClientMetadataResource`, because discovery-owned resources such as `jwks_uri` use it.
+The resolver owns the transport and every option that decides how a document is fetched and validated: `fetchClientMetadataResource`, `metadataProfile`, `originBoundFields`, `metadataRevalidationInterval`, `metadataFetchPolicy`, `maxCacheEntries`, and `isMetadataDocumentUrlAllowed`. Setting any of them next to `metadataResolver` is a type error, and it throws when the plugin is created, so a setting is never ignored without notice. The plugin fetches discovery-owned resources such as `jwks_uri` with the resolver's `fetchClientMetadataResource`.
 
 Keep these conditions in mind when you share a resolver:
 

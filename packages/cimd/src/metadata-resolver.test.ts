@@ -35,12 +35,6 @@ function sampleMetadata(clientId: string, extra: Record<string, unknown> = {}) {
 	};
 }
 
-const unusedTransport: NonNullable<
-	CimdOptions["fetchClientMetadataResource"]
-> = async () => {
-	throw new Error("discovery-owned resources are not fetched in this test");
-};
-
 function documentResponse(body: unknown, cacheControl = "max-age=3600") {
 	return Response.json(body, {
 		headers: { "cache-control": cacheControl },
@@ -236,7 +230,6 @@ describe("CIMD metadata resolver", () => {
 			fetchClientMetadataResource: async () => documentResponse(bare),
 		});
 		const discovery = createCimdClientDiscovery({
-			fetchClientMetadataResource: unusedTransport,
 			metadataResolver: resolver,
 		});
 		await discovery.resolve(current.ctx, clientId, null);
@@ -262,7 +255,6 @@ describe("CIMD metadata resolver", () => {
 		// A second cache hit finds the row current and saves nothing.
 		const onClientRefreshed = vi.fn();
 		const again = await createCimdClientDiscovery({
-			fetchClientMetadataResource: unusedTransport,
 			metadataResolver: resolver,
 			onClientRefreshed,
 		}).resolve(stale.ctx, clientId, refreshed);
@@ -297,7 +289,6 @@ describe("CIMD metadata resolver", () => {
 				documentResponse(documentFor({})),
 		});
 		const discovery = createCimdClientDiscovery({
-			fetchClientMetadataResource: unusedTransport,
 			metadataResolver: resolver,
 		});
 		await discovery.resolve(current.ctx, clientId, null);
@@ -320,7 +311,6 @@ describe("CIMD metadata resolver", () => {
 			>,
 		) {
 			return createCimdClientDiscovery({
-				fetchClientMetadataResource: unusedTransport,
 				metadataResolver: createCimdMetadataResolver({
 					fetchClientMetadataResource,
 					metadataFetchPolicy: { minimumFetchInterval: 0 },
@@ -692,7 +682,6 @@ describe("CIMD metadata resolver", () => {
 				() => new Promise<Response>(() => {}),
 			);
 			const discovery = createCimdClientDiscovery({
-				fetchClientMetadataResource: unusedTransport,
 				metadataResolver: createCimdMetadataResolver({
 					fetchClientMetadataResource,
 					metadataFetchPolicy: { minimumFetchInterval: 0 },
@@ -781,51 +770,6 @@ describe("CIMD metadata resolver", () => {
 			]);
 		});
 
-		it("fetches again after a resolution is discarded", async () => {
-			const clientId = "https://discard.example/metadata.json";
-			const fetchClientMetadataResource = vi.fn(async () =>
-				documentResponse(sampleMetadata(clientId)),
-			);
-			const resolve = createCimdMetadataResolver({
-				fetchClientMetadataResource,
-				metadataFetchPolicy: { minimumFetchInterval: 0 },
-			});
-			const { ctx } = await createRequestContext();
-
-			const resolution = await resolve(ctx, clientId);
-			resolution?.discard();
-			const refetched = await resolve(ctx, clientId);
-
-			expect(refetched?.fromCache).toBe(false);
-			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
-		});
-
-		it("does not drop a newer document when an older resolution is discarded", async () => {
-			const clientId = "https://newer.example/metadata.json";
-			let name = "First";
-			const fetchClientMetadataResource = vi.fn(async () =>
-				documentResponse(sampleMetadata(clientId, { client_name: name })),
-			);
-			const resolve = createCimdMetadataResolver({
-				fetchClientMetadataResource,
-				metadataFetchPolicy: { minimumFetchInterval: 0 },
-			});
-			const { ctx } = await createRequestContext();
-
-			const first = await resolve(ctx, clientId);
-			first?.discard();
-			name = "Second";
-			await resolve(ctx, clientId);
-			first?.discard();
-			const cached = await resolve(ctx, clientId);
-
-			expect(cached).toMatchObject({
-				fromCache: true,
-				metadata: { client_name: "Second" },
-			});
-			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
-		});
-
 		it("runs the URL policy with each request's context before any fetch", async () => {
 			const clientId = "https://policy.example/metadata.json";
 			const fetchClientMetadataResource = vi.fn(async () =>
@@ -882,13 +826,9 @@ describe("CIMD metadata resolver", () => {
 
 		function discoveryFor(
 			metadataResolver: CimdMetadataResolver,
-			options: Partial<CimdOptions> = {},
+			options: Pick<CimdOptions, "onClientCreated" | "onClientRefreshed"> = {},
 		) {
-			return createCimdClientDiscovery({
-				fetchClientMetadataResource: transport,
-				metadataResolver,
-				...options,
-			});
+			return createCimdClientDiscovery({ metadataResolver, ...options });
 		}
 
 		it("shares one fetch between per-request discoveries and saves in each request's database", async () => {
@@ -1014,6 +954,7 @@ describe("CIMD metadata resolver", () => {
 		});
 
 		it.each([
+			["fetchClientMetadataResource", transport],
 			["isMetadataDocumentUrlAllowed", () => true],
 			["maxCacheEntries", 10],
 			["metadataFetchPolicy", { minimumFetchInterval: 0 }],
@@ -1024,24 +965,17 @@ describe("CIMD metadata resolver", () => {
 			const resolver = createCimdMetadataResolver({
 				fetchClientMetadataResource: transport,
 			});
+			// TypeScript rejects this combination; JavaScript callers reach the check.
+			const options = {
+				metadataResolver: resolver,
+				[option]: value,
+			} as unknown as CimdOptions;
 
-			expect(() =>
-				createCimdClientDiscovery({
-					fetchClientMetadataResource: transport,
-					metadataResolver: resolver,
-					[option]: value,
-				}),
-			).toThrow(BetterAuthError);
-			expect(() =>
-				createCimdClientDiscovery({
-					fetchClientMetadataResource: transport,
-					metadataResolver: resolver,
-					[option]: value,
-				}),
-			).toThrow(option);
+			expect(() => createCimdClientDiscovery(options)).toThrow(BetterAuthError);
+			expect(() => createCimdClientDiscovery(options)).toThrow(option);
 		});
 
-		it("keeps the transport option next to a shared resolver for discovery-owned resources", () => {
+		it("fetches discovery-owned resources with the shared resolver's transport", () => {
 			const resolver = createCimdMetadataResolver({
 				fetchClientMetadataResource: transport,
 			});
@@ -1049,6 +983,14 @@ describe("CIMD metadata resolver", () => {
 			const discovery = discoveryFor(resolver);
 
 			expect(discovery.fetchClientMetadataResource).toBe(transport);
+		});
+
+		it("rejects a shared resolver that carries no transport", () => {
+			const resolver = (async () => null) as unknown as CimdMetadataResolver;
+
+			expect(() =>
+				createCimdClientDiscovery({ metadataResolver: resolver }),
+			).toThrow("fetchClientMetadataResource");
 		});
 
 		/**
@@ -1405,6 +1347,48 @@ describe("CIMD metadata resolver", () => {
 
 			expect(hit).toBe(seeded);
 			expect((await readClient(clientId))?.name).toBe("Newer");
+		});
+
+		it("keeps a newer cached document when an older fetched document cannot be saved", async () => {
+			const clientId = "https://owned-newer.example/metadata.json";
+			const responses = [
+				documentResponse(
+					sampleMetadata(clientId, { client_name: "First" }),
+					"max-age=0",
+				),
+				documentResponse(sampleMetadata(clientId, { client_name: "Second" })),
+			];
+			const fetchClientMetadataResource = vi.fn(async () => {
+				const response = responses.shift();
+				if (!response) throw new Error("unexpected fetch");
+				return response;
+			});
+			const discovery = createCimdClientDiscovery({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 0 },
+			});
+			const { ctx, readClient } = await createRequestContext();
+			const saveGate = deferred<void>();
+			vi.spyOn(ctx.context.adapter, "transaction").mockImplementationOnce(
+				async () => {
+					await saveGate.promise;
+					throw new Error("forced client persistence failure");
+				},
+			);
+
+			const first = discovery.resolve(ctx, clientId, null);
+			await vi.waitFor(() =>
+				expect(fetchClientMetadataResource).toHaveBeenCalledTimes(1),
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			const second = await discovery.resolve(ctx, clientId, null);
+			saveGate.resolve();
+			await expect(first).rejects.toThrow("forced client persistence failure");
+
+			expect(second?.name).toBe("Second");
+			const stored = await readClient(clientId);
+			expect(await discovery.resolve(ctx, clientId, stored)).toBe(stored);
+			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
 		});
 
 		it("returns the stored client on a cache hit", async () => {

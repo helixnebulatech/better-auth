@@ -34,7 +34,9 @@ export function createCimdClientDiscovery(
 		id: CIMD_CLIENT_DISCOVERY_ID,
 		matches: isCimdClientIdUrlCandidate,
 		resolve: resolver,
-		fetchClientMetadataResource: options.fetchClientMetadataResource,
+		fetchClientMetadataResource: options.metadataResolver
+			? options.metadataResolver.fetchClientMetadataResource
+			: options.fetchClientMetadataResource,
 		discoveryMetadata: { client_id_metadata_document_supported: true },
 	};
 }

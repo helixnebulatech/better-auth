@@ -379,6 +379,10 @@ function createMetadataResolver(
 	const fetchPolicy = resolveMetadataFetchPolicy(options);
 	const metadataCache = new Map<string, CimdMetadataCacheEntry>();
 	const inFlightFetchByClientId = new Map<string, InFlightMetadataFetch>();
+	// The latest fetch the lease retired for a client, until it settles or a
+	// newer fetch for that client starts. Only this fetch may be accepted late,
+	// and an evicted marker makes the late document unusable, which is safe.
+	const leaseRetiredFetchByClientId = new Map<string, InFlightMetadataFetch>();
 	const lastFetchStartAtMsByClientId = new Map<string, number>();
 	const fetchStateByOrigin = new Map<string, OriginFetchState>();
 	const globalFetchStartTimesMs: number[] = [];
@@ -490,6 +494,15 @@ function createMetadataResolver(
 		for (const [inFlightClientId, inFlight] of inFlightFetchByClientId) {
 			if (nowMs - inFlight.startedAtMs >= JOINED_FETCH_WAIT_MS) {
 				retireFetch(inFlightClientId, inFlight);
+				leaseRetiredFetchByClientId.delete(inFlightClientId);
+				while (leaseRetiredFetchByClientId.size >= maxCacheEntries) {
+					const oldestClientId = leaseRetiredFetchByClientId
+						.keys()
+						.next().value;
+					if (typeof oldestClientId !== "string") break;
+					leaseRetiredFetchByClientId.delete(oldestClientId);
+				}
+				leaseRetiredFetchByClientId.set(inFlightClientId, inFlight);
 			}
 		}
 		const lastFetchStartAtMs = lastFetchStartAtMsByClientId.get(clientId);
@@ -609,6 +622,7 @@ function createMetadataResolver(
 		const releaseMetadataFetchPermit = acquireMetadataFetchPermit(clientId);
 		let retired = false;
 		let acceptedLate = false;
+		let startedFetch: InFlightMetadataFetch | undefined;
 		const fetchPromise = (async (): Promise<FetchedMetadata> => {
 			const fetched = await fetchClientMetadataDocument(
 				ctx,
@@ -647,10 +661,14 @@ function createMetadataResolver(
 				Date.now(),
 			);
 			// A retired fetch leaves the cache and pacing to the fetch that replaced
-			// it. When nothing replaced it, its document is the newest there is, so
-			// it is accepted instead of spending another fetch on the same document.
+			// it. When the lease retired it and no fetch for the client started
+			// since, its document is the newest there is, so it is accepted instead
+			// of spending another fetch on the same document. The marker records
+			// the replacement directly, because a document that cannot be cached
+			// leaves no cache entry to compare.
 			if (
 				retired &&
+				leaseRetiredFetchByClientId.get(clientId) === startedFetch &&
 				!inFlightFetchByClientId.has(clientId) &&
 				metadataCache.get(clientId) === cachedEntry
 			) {
@@ -677,6 +695,8 @@ function createMetadataResolver(
 			},
 			isDiscarded: () => retired && !acceptedLate,
 		};
+		startedFetch = inFlight;
+		leaseRetiredFetchByClientId.delete(clientId);
 		inFlightFetchByClientId.set(clientId, inFlight);
 		try {
 			const fetched = await fetchPromise;
@@ -691,6 +711,9 @@ function createMetadataResolver(
 		} finally {
 			if (inFlightFetchByClientId.get(clientId) === inFlight) {
 				inFlightFetchByClientId.delete(clientId);
+			}
+			if (leaseRetiredFetchByClientId.get(clientId) === inFlight) {
+				leaseRetiredFetchByClientId.delete(clientId);
 			}
 			releaseMetadataFetchPermit();
 		}

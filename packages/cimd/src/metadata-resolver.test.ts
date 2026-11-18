@@ -723,6 +723,48 @@ describe("CIMD metadata resolver", () => {
 			expect(fetchClientMetadataResource).toHaveBeenCalledTimes(2);
 		});
 
+		it("does not accept a lease-retired fetch's document over a replacement that cannot be cached", async () => {
+			const clientId = "https://retired-no-store.example/metadata.json";
+			const otherClientId =
+				"https://retired-no-store-other.example/metadata.json";
+			const lateResponse = deferred<Response>();
+			const fetchClientMetadataResource = vi.fn(
+				async (input: RequestInfo | URL) =>
+					documentResponse(
+						sampleMetadata(String(input), { client_name: "Replacement" }),
+						"no-store",
+					),
+			);
+			fetchClientMetadataResource.mockImplementationOnce(
+				() => lateResponse.promise,
+			);
+			const resolve = createCimdMetadataResolver({
+				fetchClientMetadataResource,
+				metadataFetchPolicy: { minimumFetchInterval: 0 },
+			});
+			const { ctx } = await createRequestContext();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
+			const owner = resolve(ctx, clientId);
+			await vi.advanceTimersByTimeAsync(10_000);
+			// Another client's request takes the lease back, and a newer request
+			// fetches a document that leaves nothing in the cache.
+			await resolve(ctx, otherClientId);
+			expect(await resolve(ctx, clientId)).toMatchObject({
+				metadata: { client_name: "Replacement" },
+			});
+
+			const late = documentResponse(
+				sampleMetadata(clientId, { client_name: "Retired" }),
+				"no-store",
+			);
+			Object.defineProperty(late, "body", { value: null });
+			lateResponse.resolve(late);
+			expect(await owner).toMatchObject({
+				metadata: { client_name: "Replacement" },
+			});
+		});
+
 		it("gives a fetch that never settles its concurrency slot back after the lease", async () => {
 			const stuckClientId = "https://lease-stuck.example/metadata.json";
 			const otherClientId = "https://lease-other.example/metadata.json";
